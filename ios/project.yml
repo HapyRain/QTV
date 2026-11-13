@@ -1,0 +1,35 @@
+name: QTV
+options:
+  bundleIdPrefix: org.qtv
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "15.0"
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+targets:
+  QTV:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: QTV/App
+      - path: QTV/Api
+      - path: QTV/Core
+      - path: QTV/Data
+      - path: QTV/Player
+      - path: QTV/Assets.xcassets
+      - path: QTV/Resources/www
+        type: folder
+        buildPhase: resources
+    info:
+      path: QTV/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.qtv.app
+        INFOPLIST_FILE: QTV/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO

@@ -1,0 +1,91 @@
+name: Build QTV Apps (Android APK & iOS IPA)
+
+on:
+  push:
+    branches: [ main, master, "feat**" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-web:
+    name: Build Static Frontend (www)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend deps
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Unit tests
+        working-directory: web
+        run: npm test
+      - name: Build static web bundle (Android + iOS)
+        run: node scripts/build-web.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QTV-www-bundle
+          path: app/src/main/assets/www
+
+  build-android:
+    name: Build Android APK
+    needs: build-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: QTV-www-bundle
+          path: app/src/main/assets/www
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+      - name: Unit tests + Assemble Debug APK
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QTV-Android-APK
+          path: app/build/outputs/apk/debug/*.apk
+
+  build-ios:
+    name: Build iOS Unsigned IPA
+    needs: build-web
+    # macos-13/14 镜像已被 GitHub 退役（macos-14 秒取消、macos-13 无限排队），
+    # 当前可用的是 macOS 15（Apple Silicon）：macos-15 = macos-latest。
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: QTV-www-bundle
+          path: ios/QTV/Resources/www
+      - name: Build iOS App via xcodebuild
+        working-directory: ios
+        run: |
+          xcodebuild -project QTV.xcodeproj \
+            -scheme QTV \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+      - name: Package Unsigned IPA (AltStore / SideStore / Sideloadly / TrollStore)
+        working-directory: ios
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/QTV.app Payload/
+          zip -qr QTV-iOS-Unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QTV-iOS-IPA
+          path: ios/QTV-iOS-Unsigned.ipa

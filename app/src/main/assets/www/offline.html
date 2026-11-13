@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><script>(function(){var o=window.fetch;window.fetch=function(i,x){try{var m=((x&&x.method)||(i&&i.method)||"GET").toUpperCase();var u=(typeof i==="string")?i:(i&&i.url);if(m==="POST"&&u&&u.indexOf("/api/")>-1&&x&&typeof x.body==="string"){var enc=new TextEncoder().encode(x.body);var bin="";for(var k=0;k<enc.length;k++)bin+=String.fromCharCode(enc[k]);var a=new URL(u,location.href);a.searchParams.set("__body",btoa(bin));a.searchParams.set("__bodyEnc","1");var o2=Object.assign({},x,{method:"GET"});delete o2.body;if(o2.headers){try{delete o2.headers["Content-Type"];delete o2.headers["content-type"];}catch(e){}}return o(a.pathname+a.search,o2);}}catch(e){}return o(i,x);};})();</script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#06080c" />
+    <title>离线 · QTV</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --c-page: #06080c;
+        --c-card: #0e131c;
+        --c-line: #222d3e;
+        --c-content: #f1f5f9;
+        --c-muted: #94a3b8;
+        --c-faint: #64748b;
+        --c-accent: #38bdf8;
+        --c-on-accent: #06121c;
+      }
+      * {
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 28px;
+        padding-top: max(28px, env(safe-area-inset-top));
+        padding-bottom: max(28px, env(safe-area-inset-bottom));
+        font-family: 'MiSans', 'HarmonyOS Sans SC', 'PingFang SC', -apple-system,
+          BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+        background: radial-gradient(120% 60% at 50% 0%, rgba(17, 26, 42, 0.65) 0%, #06080c 58%) fixed,
+          #06080c;
+        color: var(--c-content);
+        text-align: center;
+      }
+      .card {
+        width: 100%;
+        max-width: 340px;
+        padding: 26px 22px;
+        border-radius: 24px;
+        border: 1px solid var(--c-line);
+        background: var(--c-card);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+      }
+      .logo {
+        width: 56px;
+        height: 56px;
+        border-radius: 16px;
+        display: block;
+        margin: 0 auto 14px;
+        box-shadow: 0 8px 26px rgba(56, 189, 248, 0.28);
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 17px;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+      }
+      p {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.65;
+        color: var(--c-muted);
+      }
+      p + p {
+        margin-top: 8px;
+      }
+      .hint {
+        color: var(--c-faint);
+        font-size: 12px;
+      }
+      button {
+        margin-top: 20px;
+        width: 100%;
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 22px;
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--c-on-accent);
+        background: linear-gradient(135deg, #38bdf8, #818cf8);
+        cursor: pointer;
+        transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      button:active {
+        transform: scale(0.96);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <img class="logo" src="/icons/icon-192.png" alt="QTV" />
+      <h1>网络连接已断开</h1>
+      <p>请检查手机的 WiFi 或移动数据，恢复网络后重新加载即可继续搜索与播放。</p>
+      <p class="hint">QTV 全部在本机运行，不需要连接任何服务器，也没有账号与登录。</p>
+      <button onclick="location.reload()">重新加载</button>
+    </div>
+  </body>
+</html>

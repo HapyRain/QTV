@@ -1,0 +1,43 @@
+# Android / Gradle
+.gradle/
+build/
+app/build/
+local.properties
+captures/
+.cxx/
+*.iml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统与日志
+.DS_Store
+Thumbs.db
+*.log
+
+# 签名与凭据（勿提交）
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# 构建中间产物
+.kotlin/
+
+# 前端（web/）
+web/node_modules/
+web/.next/
+web/out/
+web/tsconfig.tsbuildinfo
+.web-build/
+
+# iOS 构建产物
+ios/build/
+ios/DerivedData/
+ios/Payload/
+ios/*.ipa
+*.ipa
+ios/QTV.xcodeproj/xcuserdata/
+ios/QTV.xcodeproj/project.xcworkspace/xcuserdata/
