@@ -22,6 +22,10 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private let saveLock = NSLock()
     private var saveFileHandle: FileHandle?
     private var saveFileURL: URL?
+    // 最近一次成功保存的绝对路径（保存后回写到页面 `window.__QTV_LAST_SAVED_PATH__`）
+    private var lastSavedPath = ""
+    // 系统预览/分享控制器必须由 self 强引用，否则菜单弹出后立刻被释放
+    private var docInteractionController: UIDocumentInteractionController?
 
     override var prefersStatusBarHidden: Bool {
         return isPlayerFullscreen && !isPlaybackPaused
@@ -89,7 +93,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         // 兼容旧前端：两个通道都接，处理函数里按名字判断
         contentController.add(self, name: "ljjtvSave")
 
-        // 注入 window.QTV 原生保存桥与 iOS 平台标识（与 Android SaveBridge 接口完全一致），并保留 LJJTV 别名
+        // 注入 window.QTV 原生保存桥、文件位置/打开接口与 iOS 平台标识（与 Android SaveBridge 接口一致），并保留 LJJTV 别名
         let bridgeJs = """
         (function() {
           window.__QTV_IOS__ = true;
@@ -119,6 +123,23 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
               try {
                 window.webkit.messageHandlers.qtvSave.postMessage({ action: 'abort' });
               } catch (e) {}
+            },
+            // 最近一次保存成功后的绝对路径（未保存过为 ''）
+            getLastSavedPath: function() {
+              return window.__QTV_LAST_SAVED_PATH__ || '';
+            },
+            // 布尔值只代表「已受理」：WKWebView 无同步原生返回值，原生侧会再校验文件存在性
+            openSavedFile: function(path) {
+              var p = String(path || '');
+              if (!p) return false;
+              try {
+                window.webkit.messageHandlers.qtvSave.postMessage({ action: 'open', path: p });
+                return true;
+              } catch (e) { return false; }
+            },
+            // iOS 没有「打开目录」的系统 API，固定 false，由前端降级提示
+            openDownloadFolder: function() {
+              return false;
             }
           };
           window.LJJTV = window.QTV; // 兼容旧前端
@@ -181,6 +202,11 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         LocalHttpServer.shared.start(preferredPort: LocalHttpServer.shared.port)
         webView.reload()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // 页面重建后注入脚本里的 JS 变量会丢失，重载完成时把原生记录的路径补回去
+        syncLastSavedPathToJs()
     }
 
     // MARK: - WKUIDelegate (`window.confirm` / `window.alert`)
@@ -277,6 +303,12 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
               let body = message.body as? [String: Any],
               let action = body["action"] as? String else { return }
 
+        // 打开文件要弹系统 UI，不能持有 saveLock
+        if action == "open" {
+            _ = openSavedFile(path: (body["path"] as? String) ?? "")
+            return
+        }
+
         saveLock.lock()
         defer { saveLock.unlock() }
 
@@ -285,8 +317,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             abortSaveLocked()
             let rawName = (body["name"] as? String) ?? "video.mp4"
             let safeName = rawName.replacingOccurrences(of: "[\\\\/:*?\"<>|]", with: "_", options: .regularExpression)
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let downloadsDir = docs.appendingPathComponent("Downloads", isDirectory: true)
+            guard let downloadsDir = downloadsDirectory() else { break }
             try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
             let targetURL = downloadsDir.appendingPathComponent(safeName.isEmpty ? "video.mp4" : safeName)
             FileManager.default.createFile(atPath: targetURL.path, contents: nil)
@@ -303,10 +334,15 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             try? saveFileHandle?.synchronize()
             try? saveFileHandle?.close()
             saveFileHandle = nil
+            // 成功落盘才记录位置；没有活动保存（begin 失败/已 abort）时清空
+            lastSavedPath = saveFileURL?.path ?? ""
             saveFileURL = nil
+            syncLastSavedPathToJs()
 
         case "abort":
             abortSaveLocked()
+            lastSavedPath = ""
+            syncLastSavedPathToJs()
 
         default:
             break
@@ -320,5 +356,60 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             try? FileManager.default.removeItem(at: url)
         }
         saveFileURL = nil
+    }
+
+    // MARK: - 已保存文件的位置与会话内打开
+
+    private func downloadsDirectory() -> URL? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        return docs.appendingPathComponent("Downloads", isDirectory: true)
+    }
+
+    /// 只允许 Downloads 目录内的文件（与 `/api/local-file` 同一校验，防止任意路径被打开）
+    private func isInsideDownloads(_ url: URL) -> Bool {
+        guard let dirPath = downloadsDirectory()?.resolvingSymlinksInPath().standardizedFileURL.path else { return false }
+        return url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(dirPath + "/")
+    }
+
+    /// JSON 编码即合法的 JS 字符串字面量（正确处理中文、引号、反斜杠与换行）
+    private func jsStringLiteral(_ value: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
+              let literal = String(data: data, encoding: .utf8) else { return "\"\"" }
+        return literal
+    }
+
+    private func syncLastSavedPathToJs() {
+        let js = "window.__QTV_LAST_SAVED_PATH__ = \(jsStringLiteral(lastSavedPath));"
+        if Thread.isMainThread {
+            webView?.evaluateJavaScript(js, completionHandler: nil)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+    }
+
+    /// 用系统「预览/分享」打开已保存文件；路径不在 Downloads 内、文件不存在或异常返回 false。
+    func openSavedFile(path: String) -> Bool {
+        let raw = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return false }
+        let url = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL
+        var isDir: ObjCBool = false
+        guard isInsideDownloads(url),
+              FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+              !isDir.boolValue else { return false }
+
+        let show = { [weak self] in
+            guard let self = self else { return }
+            let controller = UIDocumentInteractionController(url: url)
+            self.docInteractionController = controller
+            _ = controller.presentOptionsMenu(from: self.view.bounds, in: self.view, animated: true)
+        }
+        if Thread.isMainThread {
+            show()
+        } else {
+            DispatchQueue.main.async(execute: show)
+        }
+        return true
     }
 }

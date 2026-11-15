@@ -1,4 +1,4 @@
-name: Build QTV Apps (Android APK & iOS IPA)
+name: Build QTV (Android · iOS · Windows)
 
 on:
   push:
@@ -26,12 +26,16 @@ jobs:
       - name: Unit tests
         working-directory: web
         run: npm test
-      - name: Build static web bundle (Android + iOS)
+      - name: Build static web bundle (Android + iOS + Windows)
         run: node scripts/build-web.mjs
+      # 三端共用同一份静态产物：按仓库内相对路径打包，各平台 job 解压到仓库根即可覆盖对应目录
       - uses: actions/upload-artifact@v4
         with:
           name: QTV-www-bundle
-          path: app/src/main/assets/www
+          path: |
+            app/src/main/assets/www
+            ios/QTV/Resources/www
+            windows/www
 
   build-android:
     name: Build Android APK
@@ -42,7 +46,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: QTV-www-bundle
-          path: app/src/main/assets/www
+          path: .
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -56,7 +60,7 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
 
   build-ios:
-    name: Build iOS Unsigned IPA
+    name: Build iOS (compile check)
     needs: build-web
     # macos-13/14 镜像已被 GitHub 退役（macos-14 秒取消、macos-13 无限排队），
     # 当前可用的是 macOS 15（Apple Silicon）：macos-15 = macos-latest。
@@ -66,7 +70,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: QTV-www-bundle
-          path: ios/QTV/Resources/www
+          path: .
       - name: Build iOS App via xcodebuild
         working-directory: ios
         run: |
@@ -79,13 +83,34 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             clean build
-      - name: Package Unsigned IPA (AltStore / SideStore / Sideloadly / TrollStore)
-        working-directory: ios
-        run: |
-          mkdir -p Payload
-          cp -r build/Build/Products/Release-iphoneos/QTV.app Payload/
-          zip -qr QTV-iOS-Unsigned.ipa Payload
+      # 自 v1.1 起不提供 iOS 分发包：只验证 Release 编译通过。
+
+  build-windows:
+    name: Build Windows Desktop (Installer + Portable)
+    needs: build-web
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: QTV-www-bundle
+          path: .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: windows/package-lock.json
+      - name: Install Electron deps
+        working-directory: windows
+        run: npm ci --no-audit --no-fund
+      - name: Local API contract tests
+        working-directory: windows
+        run: npm test
+      - name: Build Windows installer + portable
+        working-directory: windows
+        run: npx electron-builder --win --x64
       - uses: actions/upload-artifact@v4
         with:
-          name: QTV-iOS-IPA
-          path: ios/QTV-iOS-Unsigned.ipa
+          name: QTV-Windows-x64
+          path: windows/dist/*.exe
+          if-no-files-found: error

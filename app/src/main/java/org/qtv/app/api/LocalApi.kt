@@ -3,6 +3,8 @@ package org.qtv.app.api
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.LinkedBlockingQueue
@@ -50,6 +52,10 @@ object LocalApi {
     @Volatile
     var playerHost: PlayerHost? = null
 
+    /** MainActivity 注入的 applicationContext：/api/local-file 读缓存文件用（contentResolver + 下载目录） */
+    @Volatile
+    var appContext: android.content.Context? = null
+
     fun handle(request: WebResourceRequest): WebResourceResponse? {
         val uri = request.url ?: return null
         val path = uri.path ?: return null
@@ -63,6 +69,7 @@ object LocalApi {
                 )
                 path == "/api/detail" -> detail(uri)
                 path == "/api/player-state" -> playerState(uri)
+                path == "/api/local-file" -> localFile(uri, request.requestHeaders)
                 path == "/api/proxy" || path == "/api/live/stream" -> proxy(uri.getQueryParameter("url"), uri.getBooleanQuery("adFilter"))
                 path == "/api/quality" -> quality(
                     decodeBody(uri.getQueryParameter("__body"), uri.getQueryParameter("__bodyEnc") == "1"),
@@ -73,7 +80,7 @@ object LocalApi {
                 )
                 path == "/api/source-list" -> sourceList(uri.getQueryParameter("url"))
                 path == "/api/publish" -> jsonErr("App 版暂不支持发布")
-                path == "/api/douban" || path == "/api/hot-list" -> json("""{"items":[]}""")
+                path == "/api/douban" || path == "/api/hot-list" -> douban(uri)
                 path == "/api/bangumi/calendar" -> json("""{"days":[]}""")
                 path == "/api/live/playlist" -> livePlaylist(uri)
                 path == "/api/live/epg" -> liveEpg(uri)
@@ -145,11 +152,25 @@ object LocalApi {
         val sources = parseSources(body.optJSONArray("sources"))
         if (sources.isEmpty()) return json(bridgeLostDone(stream))
         if (!stream) {
-            val outcomes = ArrayList<SourceOutcome>()
-            runBlocking {
-                SearchRepository.search(wd, sources, filterAdult) { outcomes.add(it) }
-            }
-            return json(buildDone(outcomes).toString())
+            // 非流式也异步返回：shouldInterceptRequest 拿到 QueueInputStream 立即返回，
+            // 不再用 runBlocking 占住 WebView 的请求线程（多源并发时会互相饿死）
+            val queue = QueueInputStream()
+            Thread {
+                try {
+                    val outcomes = ArrayList<SourceOutcome>()
+                    runBlocking {
+                        SearchRepository.search(wd, sources, filterAdult) { outcomes.add(it) }
+                    }
+                    queue.offer((buildDone(outcomes).toString() + "\n").toByteArray())
+                } catch (e: Throwable) {
+                    queue.offer(
+                        (JSONObject().put("type", "done").put("list", JSONArray()).put("failures", JSONArray()).toString() + "\n").toByteArray()
+                    )
+                } finally {
+                    queue.finish()
+                }
+            }.start()
+            return WebResourceResponse("application/json", "utf-8", 200, "OK", corsHeaders(), queue)
         }
         // NDJSON 流：逐源结算即推（前端边搜边渲染的体验与网页版一致）
         val queue = QueueInputStream()
@@ -376,6 +397,109 @@ object LocalApi {
         } catch (_: Throwable) { /* 桥接失败不影响播放 */ }
         return json("""{"ok":true}""")
     }
+
+    // —— /api/local-file：把已缓存视频以本地流回给 <video>（拖动依赖 Range/206） ——
+    private fun localFile(uri: android.net.Uri, headers: Map<String, String>?): WebResourceResponse {
+        val ctx = appContext ?: return jsonErr("本地服务未初始化", 500)
+        val raw = uri.getQueryParameter("path") ?: return jsonErr("缺少 path 参数", 400)
+
+        // 只放行 App 自己写下的两类位置：MediaStore 下载 content://、App 下载目录内的绝对路径
+        var input: InputStream? = null
+        var total = 0L
+        try {
+            if (raw.startsWith("content://")) {
+                val u = android.net.Uri.parse(raw)
+                if (u.authority != android.provider.MediaStore.AUTHORITY ||
+                    !(u.path ?: "").startsWith("/external/downloads")
+                ) {
+                    return jsonErr("不允许读取该路径", 403)
+                }
+                // openAssetFileDescriptor：流关闭时一并关掉 ParcelFileDescriptor（openFileDescriptor 只给裸 fd，易双关）
+                val afd = ctx.contentResolver.openAssetFileDescriptor(u, "r")
+                    ?: return jsonErr("缓存文件不存在", 404)
+                val stream = afd.createInputStream()
+                input = stream
+                total = if (afd.length >= 0) afd.length else stream.channel.size()
+            } else {
+                val f = File(raw)
+                val root = ctx.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)?.canonicalPath
+                    ?: return jsonErr("下载目录不可用", 404)
+                if (!f.isAbsolute || !f.canonicalPath.startsWith(root + File.separator)) {
+                    return jsonErr("不允许读取该路径", 403)
+                }
+                input = FileInputStream(f)
+                total = f.length()
+            }
+        } catch (_: Throwable) {
+            return jsonErr("读取缓存文件失败", 404)
+        }
+        val data = input ?: return jsonErr("文件不可读", 404)
+
+        var start = 0L
+        var end = total - 1
+        var partial = false
+        // Range: bytes=start-end / start- / -suffix；解析不出来的按无 Range 整文件返回（RFC 允许忽略）
+        val rangeHeader = headers?.entries?.firstOrNull { it.key.equals("Range", true) }?.value?.trim()
+        val range = if (total > 0 && rangeHeader != null) {
+            Regex("^bytes=(\\d*)-(\\d*)$", RegexOption.IGNORE_CASE).find(rangeHeader)?.groupValues
+        } else {
+            null
+        }
+        if (range != null) {
+            val from = range[1].toLongOrNull()
+            val to = range[2].toLongOrNull()
+            if (from != null && from < total) {
+                start = from
+                end = minOf(to ?: (total - 1), total - 1)
+                if (end < start) {
+                    start = 0          // bytes=9-3 这类非法区间：忽略，给整文件
+                    end = total - 1
+                } else {
+                    partial = true
+                }
+            } else if (from != null) {
+                try { data.close() } catch (_: Throwable) { /* 忽略 */ }
+                return WebResourceResponse(
+                    "video/mp4", null, 416, "Range Not Satisfiable",
+                    mapOf(
+                        "Accept-Ranges" to "bytes",
+                        "Content-Range" to "bytes */$total",
+                        "Access-Control-Allow-Origin" to "*",
+                    ),
+                    ByteArrayInputStream(ByteArray(0)),
+                )
+            } else if (to != null && to > 0) {
+                start = maxOf(0L, total - to)     // bytes=-N：末尾 N 字节
+                partial = true
+            }
+        }
+        var skipped = 0L
+        while (skipped < start) {
+            val n = data.skip(start - skipped)
+            if (n <= 0) break
+            skipped += n
+        }
+        if (skipped < start) {
+            // 提供者给的不是可定位文件（管道流）：宁可不播，也不把文件头当成 Range 起点回出去
+            try { data.close() } catch (_: Throwable) { /* 忽略 */ }
+            return jsonErr("缓存文件不支持定位读取", 500)
+        }
+        val length = end - start + 1
+        val respHeaders = linkedMapOf(
+            "Accept-Ranges" to "bytes",
+            "Content-Length" to length.toString(),
+            "Access-Control-Allow-Origin" to "*",
+        )
+        if (partial) respHeaders["Content-Range"] = "bytes $start-$end/$total"
+        return WebResourceResponse(
+            guessContentType(raw).takeUnless { it == "application/octet-stream" } ?: "video/mp4",
+            null,
+            if (partial) 206 else 200,
+            if (partial) "Partial Content" else "OK",
+            respHeaders,
+            BoundedStream(data, length),
+        )
+    }
     // —— /api/quality：画质嗅探（两级策略见 QualityProbe；并发 3，stream=1 逐条推送 + 首字节心跳） ——
     private fun quality(bodyRaw: String?, stream: Boolean): WebResourceResponse {
         val body = parseBody(bodyRaw)
@@ -422,9 +546,20 @@ object LocalApi {
         }
 
         if (!stream) {
-            val results = java.util.concurrent.ConcurrentLinkedQueue<JSONObject>()
-            runAll { results.add(it) }
-            return json(JSONObject().put("results", JSONArray(results.toList())).toString())
+            // 同样异步：逐条请求在 WebView 线程池里不再阻塞等待探测完成
+            val queue = QueueInputStream()
+            Thread {
+                try {
+                    val results = java.util.concurrent.ConcurrentLinkedQueue<JSONObject>()
+                    runAll { results.add(it) }
+                    queue.offer(JSONObject().put("results", JSONArray(results.toList())).toString().toByteArray())
+                } catch (_: Throwable) {
+                    queue.offer(JSONObject().put("results", JSONArray()).toString().toByteArray())
+                } finally {
+                    queue.finish()
+                }
+            }.start()
+            return WebResourceResponse("application/json", "utf-8", 200, "OK", corsHeaders(), queue)
         }
 
         val queue = QueueInputStream()
@@ -626,6 +761,64 @@ object LocalApi {
         return WebResourceResponse(contentType, null, 200, "OK", corsHeaders(), WrappedStream(stream, resp))
     }
 
+
+    // 豆瓣热播：与 Windows 本地服务同一套 rexxar 接口与移动 UA/Referer。
+    // 电影榜单按 hot -> top250 -> showing 依次兜底，避免单个 collection 被风控时整块空白。
+    private fun douban(uri: android.net.Uri): WebResourceResponse {
+        val type = uri.getQueryParameter("type") ?: "tv"
+        val start = uri.getQueryParameter("pageStart")?.toIntOrNull()?.coerceIn(0, 200) ?: 0
+        val size = uri.getQueryParameter("pageSize")?.toIntOrNull()?.coerceIn(1, 50) ?: 20
+        val collections = if (type == "movie") {
+            listOf("movie_hot", "movie_top250", "movie_showing")
+        } else {
+            listOf("tv_hot", "tv_chinese_best_weekly")
+        }
+        for (collection in collections) {
+            try {
+                val url = "https://m.douban.com/rexxar/api/v2/subject_collection/${collection}/items?start=$start&count=$size"
+                val req = okhttp3.Request.Builder().url(url)
+                    .header("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+                    .header("Referer", "https://m.douban.com/")
+                    .header("Accept", "application/json")
+                    .build()
+                val body = NetClient.client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) null else resp.body?.string()
+                } ?: continue
+                val arr = JSONObject(body).optJSONArray("subject_collection_items") ?: continue
+                if (arr.length() == 0) continue
+                val items = JSONArray()
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val title = o.optString("title")
+                    if (title.isBlank()) continue
+                    val item = JSONObject()
+                    item.put("id", o.optString("id"))
+                    item.put("title", title)
+                    val pic = o.optJSONObject("pic")
+                    val coverObj = o.optJSONObject("cover")
+                    item.put(
+                        "cover",
+                        pic?.optString("large")?.takeIf { it.isNotBlank() }
+                            ?: pic?.optString("normal")?.takeIf { it.isNotBlank() }
+                            ?: coverObj?.optString("url")
+                            ?: ""
+                    )
+                    val rating = o.optJSONObject("rating")?.optDouble("value", 0.0) ?: 0.0
+                    if (rating > 0) item.put("rating", String.format(java.util.Locale.US, "%.1f", rating))
+                    item.put("isTv", collection.startsWith("tv"))
+                    items.put(item)
+                }
+                if (items.length() == 0) continue
+                val out = JSONObject()
+                out.put("items", items)
+                return json(out.toString())
+            } catch (_: Exception) {
+                // 换下一个榜单
+            }
+        }
+        return json("""{"items":[]}""")
+    }
+
     private fun guessContentType(url: String): String {
         val p = url.substringBefore('?').lowercase()
         return when {
@@ -648,6 +841,26 @@ object LocalApi {
         override fun close() {
             try { inner.close() } finally { resp.close() }
         }
+    }
+
+    /** 最多吐 [remaining] 字节：Range 响应体不能越过 Content-Length 把整个文件续下去 */
+    private class BoundedStream(private val inner: InputStream, private var remaining: Long) : InputStream() {
+        override fun read(): Int {
+            if (remaining <= 0) return -1
+            val b = inner.read()
+            if (b >= 0) remaining--
+            return b
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            if (remaining <= 0) return -1
+            val n = inner.read(b, off, minOf(len.toLong(), remaining).toInt())
+            if (n > 0) remaining -= n
+            return n
+        }
+
+        override fun close() = inner.close()
     }
 
 }

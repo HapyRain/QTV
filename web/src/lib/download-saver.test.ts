@@ -18,6 +18,7 @@ function installBridge(endReturns = true) {
       return endReturns;
     },
     saveAbort: () => calls.push('abort'),
+    getLastSavedPath: () => '/storage/emulated/0/Download/demo.mp4',
   };
   (globalThis as unknown as { window: unknown }).window = { LJJTV: bridge };
   return calls;
@@ -63,6 +64,15 @@ describe('download-saver · App 壳原生保存', () => {
     const target = nativeSaveTarget('bad.mp4');
     await target.write(new Uint8Array([1, 2, 3]));
     await expect(target.close()).rejects.toThrow('保存到设备失败');
+  });
+
+  it('保存成功后能拿到原生报告的位置（离线播放入口依赖它）', async () => {
+    installBridge();
+    const target = nativeSaveTarget('demo.mp4');
+    expect(target.getSavedPath?.()).toBeNull();
+    await target.write(new Uint8Array([1]));
+    await target.close();
+    expect(target.getSavedPath?.()).toBe('/storage/emulated/0/Download/demo.mp4');
   });
 
   it('abort 调原生 saveAbort', async () => {

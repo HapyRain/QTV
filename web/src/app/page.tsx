@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Header, requestShowHistory, requestShowSettings } from '@/components/header';
 import { requestShowDownloadManager } from '@/components/download-manager';
@@ -24,6 +24,8 @@ import { useAuth } from '@/components/auth';
 import { Switch } from '@/components/settings-shared';
 import { db } from '@/lib/db';
 import { playedMinutesToday } from '@/lib/playtime-reminder';
+import { useDesktopShell } from '@/lib/desktop';
+import { DesktopExplore } from '@/components/desktop/home/desktop-explore';
 
 const RESULT_PAGE_SIZE = 60;
 
@@ -55,10 +57,17 @@ export default function HomePage() {
 
 function HomeContent() {
   const searchParams = useSearchParams();
+  const desktop = useDesktopShell();
   const activeTab = searchParams.get('tab') || 'explore';
 
+  // 「我的」两个端共用同一份 ProfileHubView，不另做桌面版
   if (activeTab === 'profile') {
     return <ProfileHubView />;
+  }
+  // desktop 首帧恒为 false（与静态导出 HTML 一致），移动端行为因此完全不变：
+  // 只有真桌面壳在挂载后才会切到宽屏首页
+  if (desktop) {
+    return <DesktopExplore />;
   }
   return <ExploreView />;
 }
@@ -89,7 +98,7 @@ function ExploreView() {
   const [input, setInput] = useState(urlQuery);
   const [detailItem, setDetailItem] = useState<SearchResultItem | null>(null);
   const [streamedOutcomes, setStreamedOutcomes] = useState<SourceSearchOutcome[]>([]);
-  const [greeting, setGreeting] = useState({ title: '专属观影时刻', subtitle: '聚合搜索 · 多源直连 · 纯净无广' });
+  const [greeting, setGreeting] = useState({ title: '专属观影时刻', subtitle: '多源搜索 · 高清播放 · 无广告' });
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -100,6 +109,16 @@ function ExploreView() {
     setInput(urlQuery);
   }, [urlQuery]);
 
+  const [homeTab, setHomeTab] = useState<'tv' | 'movie'>('tv');
+  const recommendations = useQuery({
+    queryKey: ['mobile-douban', homeTab],
+    queryFn: ({ signal }) => api.douban(homeTab, '热门', 0, 12, signal),
+    enabled: !urlQuery,
+    staleTime: 30 * 60_000,
+    placeholderData: keepPreviousData,
+  });
+  const featured = recommendations.data?.items?.[0];
+  const recommendItems = recommendations.data?.items?.slice(0, 6) ?? [];
   // IndexedDB 实时读取最近观看记录（首屏「继续观看」画廊）
   const recentHistory = useLiveQuery(
     () => db.history.orderBy('timestamp').reverse().limit(12).toArray(),
@@ -144,7 +163,10 @@ function ExploreView() {
       return api.search(urlQuery.slice(0, 100), selectedSources, yellowFilter, {
         signal,
         onSource: (outcome) => {
-          setStreamedOutcomes((prev) => [...prev, outcome]);
+          setStreamedOutcomes((prev) => [
+            ...prev.filter((o) => o.sourceKey !== outcome.sourceKey),
+            outcome,
+          ]);
           for (const ev of useAppStore.getState().recordSourceHealth([outcome])) {
             toast(
               ev.permanent
@@ -175,14 +197,14 @@ function ExploreView() {
       return;
     }
     inputRef.current?.blur();
-    router.push(`/?s=${encodeURIComponent(query)}`, { scroll: false });
+    router.replace(`/?s=${encodeURIComponent(query)}`, { scroll: false });
     searchHistory.record(query);
   };
 
   const clearSearch = () => {
     setInput('');
     if (urlQuery) {
-      router.push('/', { scroll: false });
+      router.replace('/', { scroll: false });
     } else {
       inputRef.current?.focus();
     }
@@ -213,7 +235,9 @@ function ExploreView() {
   const searchTotal = selectedSources.length;
   const searchFinished = Boolean(searchQuery.data) && !searchQuery.isFetching;
   const searchFailed = Boolean(searchQuery.isError) && !searchQuery.isFetching;
-  const searchDone = searchFinished ? searchTotal : streamedOutcomes.length;
+  const searchDone = searchFinished
+    ? searchTotal
+    : Math.min(searchTotal, new Set(streamedOutcomes.map((o) => o.sourceKey)).size);
   const searchPct = searchTotal > 0 ? Math.min(100, Math.round((searchDone / searchTotal) * 100)) : 0;
 
   return (
@@ -349,9 +373,97 @@ function ExploreView() {
           )}
         </section>
 
-        {/* 首屏态（无搜索词）：继续观看画廊 + 快速状态引导 */}
+        {/* 首屏态（无搜索词）：精选 hero + 继续观看 + 海报墙 */}
         {!urlQuery && (
           <>
+            <section aria-label="今日精选" className={cn(recommendations.isFetching && 'opacity-80 transition-opacity')}>
+              <div className="mb-2.5 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setHomeTab('tv')}
+                  className={cn('chip', homeTab === 'tv' && 'bg-accent/15 text-accent border-accent/30')}
+                >
+                  热门剧集
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHomeTab('movie')}
+                  className={cn('chip', homeTab === 'movie' && 'bg-accent/15 text-accent border-accent/30')}
+                >
+                  热门电影
+                </button>
+              </div>
+
+              {featured ? (
+                <button
+                  type="button"
+                  onClick={() => runSearch(featured.title)}
+                  className="pressable relative block w-full aspect-[16/10] max-h-[250px] rounded-3xl overflow-hidden border border-line/60 bg-card text-left"
+                >
+                  <SmartImage
+                    url={featured.cover}
+                    mode={homeTab === 'movie' ? 'proxy' : imageProxyMode}
+                    customProxy={homeTab === 'movie' ? undefined : customImageProxy}
+                    alt={featured.title}
+                    className="absolute inset-0 w-full h-full object-cover"
+                    loading="eager"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/92 via-black/30 to-transparent" />
+                  <div className="absolute inset-x-4 bottom-4 text-white">
+                    <div className="text-[9px] tracking-[0.22em] text-white/70">今日精选 · 豆瓣热播</div>
+                    <h2 className="mt-1.5 text-xl font-bold tracking-tight leading-tight">{featured.title}</h2>
+                    <div className="mt-1.5 flex items-center gap-2 text-[11px] text-white/75">
+                      {featured.rating && <span className="font-semibold text-sky-300">{featured.rating}</span>}
+                      <span>{homeTab === 'tv' ? '剧集' : '电影'}</span>
+                      <span>点击搜索片源</span>
+                    </div>
+                    <span className="mt-2.5 inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-1.5 text-[11px] font-semibold text-black">
+                      <Icon name="search" className="w-3.5 h-3.5" />查找片源
+                    </span>
+                  </div>
+                </button>
+              ) : (
+                <div className="flex h-[160px] items-center justify-center rounded-3xl border border-line/60 bg-card text-xs text-faint">
+                  {recommendations.isError ? '豆瓣推荐加载失败，可下拉重试' : '正在加载豆瓣推荐…'}
+                </div>
+              )}
+            </section>
+
+            {recommendItems.length > 0 && (
+              <section aria-label="今日精选海报">
+                <div className="flex items-center justify-between mb-2.5 px-0.5">
+                  <h2 className="text-sm font-bold text-content">今日精选</h2>
+                  <span className="text-[11px] text-faint">数据来自豆瓣公开榜单</span>
+                </div>
+                <div className="grid grid-cols-3 gap-2.5">
+                  {recommendItems.map((item) => (
+                    <button
+                      key={`${homeTab}_${item.id}`}
+                      type="button"
+                      onClick={() => runSearch(item.title)}
+                      className="pressable relative aspect-[2/3] rounded-2xl overflow-hidden border border-line/60 bg-card text-left"
+                    >
+                      <SmartImage
+                        url={item.cover}
+                        mode={homeTab === 'movie' ? 'proxy' : imageProxyMode}
+                        customProxy={homeTab === 'movie' ? undefined : customImageProxy}
+                        alt={item.title}
+                        className="absolute inset-0 w-full h-full object-cover"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-transparent to-transparent" />
+                      {item.rating && (
+                        <span className="absolute top-1.5 right-1.5 rounded-md bg-black/55 px-1.5 py-0.5 text-[9px] font-semibold text-sky-200 backdrop-blur">
+                          {item.rating}
+                        </span>
+                      )}
+                      <span className="absolute inset-x-2 bottom-2 text-[11px] font-semibold text-white truncate">
+                        {item.title}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
             {selectedSources.length === 0 && (
               <NoSourceGuide hasSources={customAPIs.length > 0 || envSources.length > 0} />
             )}
@@ -618,8 +730,8 @@ function ProfileHubView() {
     <div className="min-h-screen-safe flex flex-col pb-tabbar">
       <header className="safe-top px-4 pt-4 pb-2 flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-extrabold tracking-tight text-content">我的片库与偏好</h1>
-          <p className="text-xs text-faint">专属私人影院 · 本机隐私存储</p>
+          <h1 className="text-lg font-extrabold tracking-tight text-content">我的</h1>
+
         </div>
         <button
           type="button"
@@ -632,23 +744,6 @@ function ProfileHubView() {
       </header>
 
       <main className="page-in flex-1 max-w-2xl w-full mx-auto px-4 pt-2 pb-4 space-y-4">
-        {/* 顶部专属陪伴状态卡 */}
-        <section className="card p-4 bg-gradient-to-br from-sky-500/15 via-indigo-500/8 to-card border-accent/30">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-accent/20 text-accent ring-1 ring-accent/30">
-                <Icon name="sparkles" className="w-5 h-5" />
-              </div>
-              <div className="min-w-0">
-                <div className="text-sm font-bold text-content">今日已陪伴观影 {playedMin} 分钟</div>
-                <p className="text-xs text-muted mt-0.5">
-                  每连续观看 45 分钟，灵动胶囊会自动提醒喝水休息
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-
         {/* 核心片库与数据源四宫格 */}
         <section className="grid grid-cols-2 gap-2.5">
           <button
@@ -700,7 +795,7 @@ function ProfileHubView() {
             </div>
             <div>
               <div className="text-sm font-semibold text-content">数据源与订阅</div>
-              <div className="text-[11px] text-faint">点播源 · 直播 {enabledLiveCount} 源 · 测活</div>
+              <div className="text-[11px] text-faint">点播源 · 直播 {enabledLiveCount} 个</div>
             </div>
           </button>
 
@@ -731,7 +826,7 @@ function ProfileHubView() {
           <div className="px-4 py-3 flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-sm font-medium text-content">智能去广告切片</div>
-              <div className="text-xs text-faint">自动识别并剔除正片中插播的广告分片</div>
+              <div className="text-xs text-faint">自动跳过正片里的插播广告</div>
             </div>
             <Switch
               checked={store.adFilter}
@@ -875,7 +970,7 @@ function NoSourceGuide({ hasSources = false }: { hasSources?: boolean }) {
       <p className="text-xs text-muted leading-relaxed mb-4">
         {hasSources
           ? '你已导入点播源，勾选启用后即可聚合搜索全网影视。'
-          : '支持一键导入数据源订阅链接（或单独添加 Apple CMS 接口），配置后即可免登录畅看。'}
+          : '支持一键导入片源订阅链接，也可以手动添加片源地址，配置好就能直接看。'}
       </p>
       <button
         type="button"

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { buildImageCandidates } from '@/lib/utils';
+import { getCachedImage, warmImageCache } from '@/lib/image-cache';
 
 interface SmartImageProps {
   /** 原始图片地址（未经代理加工，降级链由本组件按加载方式生成） */
@@ -32,15 +33,28 @@ export function SmartImage({
 }: SmartImageProps) {
   const candidates = buildImageCandidates(url, mode, customProxy);
   const [idx, setIdx] = useState(0);
+  const [cachedSrc, setCachedSrc] = useState<string | undefined>();
 
   // 地址或加载方式变化时重置降级进度
   useEffect(() => setIdx(0), [url, mode, customProxy]);
+  useEffect(() => {
+    let alive = true;
+    setCachedSrc(undefined);
+    if (url) {
+      void getCachedImage(url).then((src) => {
+        if (alive && src) setCachedSrc(src);
+      });
+    }
+    return () => {
+      alive = false;
+    };
+  }, [url]);
   useEffect(() => {
     if (idx >= candidates.length) onExhausted?.();
     // 候选数组随 url/mode 变化，length 是充分的稳定信号
   }, [idx, candidates.length, onExhausted]);
 
-  const src = candidates[idx];
+  const src = cachedSrc ?? candidates[idx];
   if (!src) return null;
   return (
     // eslint-disable-next-line @next/next/no-img-element
@@ -50,7 +64,16 @@ export function SmartImage({
       className={className}
       loading={loading}
       referrerPolicy="no-referrer"
-      onError={() => setIdx((i) => i + 1)}
+      onError={() => {
+        if (cachedSrc) {
+          setCachedSrc(undefined);
+          return;
+        }
+        setIdx((i) => i + 1);
+      }}
+      onLoad={() => {
+        if (url) void warmImageCache(url);
+      }}
     />
   );
 }

@@ -68,6 +68,13 @@ export interface DownloadTaskEntry {
   errorNum: number;
   createdAt: number;
   updatedAt: number;
+  /** 原生桥报告的实际保存位置（content:// / 绝对路径）；完成后才有值 */
+  filePath?: string;
+  /** 这条缓存属于哪一集：用于回到播放页时命中离线播放 */
+  episodeKey?: string;
+  sourceKey?: string;
+  vodId?: string;
+  episodeIndex?: number;
 }
 
 export const db = new Dexie('libretv') as Dexie & {
@@ -232,36 +239,50 @@ export async function importConfig(content: string): Promise<void> {
     name?: string;
     data?: Record<string, string>;
   };
-  // 兼容旧版备份\n  if (config.name !== 'QTV-Settings' && config.name !== 'LibreTV-Settings') throw new Error('配置文件格式不正确');
+  if (config.name !== 'QTV-Settings' && config.name !== 'LibreTV-Settings') {
+    throw new Error('配置文件格式不正确');
+  }
   const data = config.data || {};
 
-  if (typeof data[PERSIST_KEY] === 'string') {
-    // 关键：先 flush 节流缓冲中的旧状态再写导入配置，否则缓冲会在
-    // 之后 flush 时用导入前的旧状态覆盖刚写入的配置（导入静默丢失）
-    flushPendingPersist();
-    localStorage.setItem(PERSIST_KEY, data[PERSIST_KEY]);
-  }
-
+  // 先把历史完整解析成待写条目，任何一条结构坏掉都在改动数据之前失败
+  const legacy: Omit<HistoryEntry, 'id'>[] = [];
   if (typeof data['viewingHistory'] === 'string') {
-    // 兼容旧版历史结构（含全集 URL 列表），只迁移定位信息
-    const legacy = JSON.parse(data['viewingHistory']) as Record<string, unknown>[];
-    for (const item of legacy.slice(0, MAX_HISTORY)) {
+    const parsed = JSON.parse(data['viewingHistory']) as Record<string, unknown>[];
+    if (!Array.isArray(parsed)) throw new Error('观看历史格式不正确');
+    for (const item of parsed.slice(0, MAX_HISTORY)) {
       const sourceKey = String(item.sourceCode || item.sourceName || '');
       const vodId = String(item.vod_id || '');
       const title = String(item.title || '未知视频');
       if (!sourceKey || !vodId) continue;
-      const totalEpisodes = Array.isArray(item.episodes) ? item.episodes.length : 0;
-      await upsertHistory({
+      legacy.push({
         sourceKey,
         vodId,
         title,
         episodeIndex: typeof item.episodeIndex === 'number' ? item.episodeIndex : 0,
-        totalEpisodes,
+        totalEpisodes: Array.isArray(item.episodes) ? item.episodes.length : 0,
         playbackPosition: typeof item.playbackPosition === 'number' ? item.playbackPosition : 0,
         duration: typeof item.duration === 'number' ? item.duration : 0,
         timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now(),
       });
     }
+  }
+
+  // 历史写入失败时回滚 settings，避免「报错但配置已被覆盖」
+  const previousSettings = localStorage.getItem(PERSIST_KEY);
+  try {
+    if (legacy.length > 0) {
+      await db.transaction('rw', db.history, async () => {
+        for (const item of legacy) await upsertHistory(item);
+      });
+    }
+    if (typeof data[PERSIST_KEY] === 'string') {
+      flushPendingPersist();
+      localStorage.setItem(PERSIST_KEY, data[PERSIST_KEY]);
+    }
+  } catch (err) {
+    if (previousSettings === null) localStorage.removeItem(PERSIST_KEY);
+    else localStorage.setItem(PERSIST_KEY, previousSettings);
+    throw err;
   }
 }
 

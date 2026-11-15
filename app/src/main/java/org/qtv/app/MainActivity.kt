@@ -25,6 +25,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -66,8 +67,11 @@ class MainActivity : ComponentActivity() {
 
     // —— 下载保存桥（WebView 的 blob 下载在 Android 上静默失败，必须走原生落盘） ——
     private var saveStream: OutputStream? = null
+    private var saveFailed = false
     private var saveUri: Uri? = null
     private var saveIsMediaStore = false
+    /** 最近一次成功保存的定位符：Q+ 为 MediaStore `content://` Uri，Q 以下为文件绝对路径；空 = 没有 */
+    private var lastSavedPath: String = ""
     private val saveLock = Any()
 
     /** 网页里 `<input type="file">`（配置导入）依赖这个回调桥接系统文件选择器 */
@@ -108,7 +112,10 @@ class MainActivity : ComponentActivity() {
                         "(function(){try{var f=window.__qtvCloseOverlay||window.__ljjtvCloseOverlay;return !!(f && f());}catch(e){return false;}})();",
                     ) { result ->
                         if (result == "true") return@evaluateJavascript
-                        if (wv.canGoBack()) {
+                        // 根页不陪历史记录玩：搜索词用 replace 不再叠层，回到首页直接走退出确认
+                        val path = (wv.url ?: "").substringBefore('?').substringBefore('#')
+                        val isHome = path.endsWith("/index.html") || path.endsWith("/")
+                        if (!isHome && wv.canGoBack()) {
                             wv.goBack()
                             return@evaluateJavascript
                         }
@@ -148,6 +155,8 @@ class MainActivity : ComponentActivity() {
 
         // 播放状态桥 + 文件保存桥（本地捆绑前端专用，不注入远程内容）
         LocalApi.playerHost = host
+        // /api/local-file 需要 contentResolver 与下载目录（applicationContext，不持有 Activity）
+        LocalApi.appContext = applicationContext
         try {
             // QTV 为主通道名；LJJTV 保留为兼容别名（旧前端/旧书签仍可用）
             wv.removeJavascriptInterface("QTV")
@@ -425,6 +434,7 @@ class MainActivity : ComponentActivity() {
         fun saveBegin(name: String) {
             synchronized(saveLock) {
                 abortSaveLocked()
+                saveFailed = false
                 val safe = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "video.mp4" }
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -455,14 +465,21 @@ class MainActivity : ComponentActivity() {
             synchronized(saveLock) {
                 try {
                     val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
-                    saveStream?.write(bytes)
-                } catch (_: Throwable) { /* 丢块：saveEnd 会判失败 */ }
+                    val out = saveStream
+                    if (out == null) saveFailed = true else out.write(bytes)
+                } catch (_: Throwable) {
+                    saveFailed = true
+                }
             }
         }
 
         @JavascriptInterface
         fun saveEnd(): Boolean {
             synchronized(saveLock) {
+                if (saveFailed) {
+                    abortSaveLocked()
+                    return false
+                }
                 return try {
                     saveStream?.flush()
                     saveStream?.close()
@@ -480,9 +497,15 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
-                    val ok = saveUri != null
+                    val saved = saveUri
+                    // 保存位置交给前端（离线缓存中心的入口 + 离线播放的 path）；失败/取消时 abortSaveLocked 清空
+                    lastSavedPath = when {
+                        saved == null -> ""
+                        saveIsMediaStore -> saved.toString()
+                        else -> saved.path ?: ""
+                    }
                     saveUri = null
-                    ok
+                    saved != null
                 } catch (_: Throwable) {
                     abortSaveLocked()
                     false
@@ -495,6 +518,45 @@ class MainActivity : ComponentActivity() {
             synchronized(saveLock) { abortSaveLocked() }
         }
 
+        /** 最近一次成功保存的位置（`""` = 没有）：前端存进离线缓存中心，播放时再交给 /api/local-file */
+        @JavascriptInterface
+        fun getLastSavedPath(): String = synchronized(saveLock) { lastSavedPath }
+
+        /**
+         * 拉起系统播放器打开已保存文件。
+         * - `content://`（Q+ 的 MediaStore 下载）直接交给播放器，无需额外权限；
+         * - 普通路径必须走 FileProvider：API 24+ 用 Uri.fromFile 会抛 FileUriExposedException，
+         *   而本 App 的 AndroidManifest 目前没有声明 provider，探测不到就直接返回 false（前端降级）。
+         *   声明 `androidx.core.content.FileProvider`（authority = "$packageName.fileprovider"）后自动生效。
+         */
+        @JavascriptInterface
+        fun openSavedFile(path: String): Boolean {
+            if (path.isBlank()) return false
+            return try {
+                val uri = if (path.startsWith("content://")) {
+                    Uri.parse(path)
+                } else {
+                    if (!File(path).isAbsolute) return false
+                    val authority = "$packageName.fileprovider"
+                    if (packageManager.resolveContentProvider(authority, 0) == null) return false
+                    FileProvider.getUriForFile(this@MainActivity, authority, File(path))
+                }
+                startActivity(
+                    Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, "video/mp4")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    },
+                )
+                true
+            } catch (_: Throwable) {
+                false // 没有播放器能处理 video/mp4，或 Uri 无效
+            }
+        }
+
+        /** Android 没有统一的「下载目录」UI 入口：固定 false，前端据此走降级提示 */
+        @JavascriptInterface
+        fun openDownloadFolder(): Boolean = false
+
         private fun abortSaveLocked() {
             try { saveStream?.close() } catch (_: Throwable) { /* 忽略 */ }
             saveStream = null
@@ -506,6 +568,7 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (_: Throwable) { /* 忽略 */ }
             saveUri = null
+            lastSavedPath = ""
         }
 
         private fun mimeFor(name: String): String = when {

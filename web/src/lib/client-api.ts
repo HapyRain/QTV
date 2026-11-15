@@ -1,6 +1,7 @@
 'use client';
 
 import type { SearchResponse, SearchStreamEvent, SourceSearchOutcome, VideoDetail, DoubanResponse, BangumiCalendarResponse, AuthStatusResponse, SourceConfig, SearchResultItem, LivePlaylistResponse, LiveEpgResponse, SourceListPayload, QualityProbeItem, QualityProbeResult } from './types';
+import { isDesktopShell } from './desktop';
 
 /**
  * 客户端 API 封装。401 时触发全局事件打开登录框，
@@ -138,6 +139,12 @@ export const api = {
         signal,
       });
     }
+    // WebView 的 shouldInterceptRequest 会把 NDJSON 流缓冲到结束才交给页面，
+    // 原生壳里改为「一个源一个请求」，谁先回谁先上屏。
+    const nativeShell = typeof window !== 'undefined' && Boolean((window as { QTV?: unknown }).QTV);
+    if (!isDesktopShell() && nativeShell) {
+      return searchPerSource(wd, sources, filterAdult, onSource, signal);
+    }
     return searchStream(wd, sources, filterAdult, onSource, signal);
   },
 
@@ -159,6 +166,30 @@ export const api = {
     onResult: (result: QualityProbeResult) => void,
     signal?: AbortSignal
   ): Promise<void> => {
+    // 同搜索：WebView 会把 NDJSON 缓冲到结束，原生壳改为逐条请求，先探到的先回调
+    const nativeShell = typeof window !== 'undefined' && Boolean((window as { QTV?: unknown }).QTV);
+    if (!isDesktopShell() && nativeShell) {
+      await Promise.all(
+        items.map(async (item) => {
+          try {
+            const res = await request<{ results: QualityProbeResult[] }>('/api/quality', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ items: [item] }),
+              signal,
+            });
+            for (const result of res.results ?? []) onResult(result);
+          } catch (err) {
+            onResult({
+              sourceKey: item.source.key,
+              vodId: item.id,
+              error: err instanceof Error ? err.message : '探测失败',
+            });
+          }
+        })
+      );
+      return;
+    }
     let res: Response;
     try {
       res = await fetch('/api/quality?stream=1', {
@@ -318,6 +349,52 @@ export interface SearchFailure {
   sourceKey: string;
   error: string;
   timedOut?: boolean;
+}
+
+/**
+ * 原生壳专用：每个源单独请求 /api/search，单源结算即回调。
+ * 需要绕过 WebView 对拦截响应的整段缓冲，代价是源多时请求数变多。
+ */
+async function searchPerSource(
+  wd: string,
+  sources: SourceConfig[],
+  filterAdult: boolean,
+  onSource: (outcome: SourceSearchOutcome) => void,
+  signal?: AbortSignal
+): Promise<SearchResponse> {
+  const outcomes = await Promise.all(
+    sources.map(async (source) => {
+      try {
+        const res = await request<SearchResponse>('/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wd, sources: [source], filterAdult }),
+          signal,
+        });
+        const failure = res.failures?.find((f) => f.sourceKey === source.key);
+        const outcome: SourceSearchOutcome = failure
+          ? { sourceKey: source.key, ok: false, list: [], error: failure.error, timedOut: failure.timedOut }
+          : { sourceKey: source.key, ok: true, list: res.list };
+        onSource(outcome);
+        return outcome;
+      } catch (err) {
+        const outcome: SourceSearchOutcome = {
+          sourceKey: source.key,
+          ok: false,
+          list: [],
+          error: err instanceof Error ? err.message : '请求失败',
+        };
+        onSource(outcome);
+        return outcome;
+      }
+    })
+  );
+  return {
+    list: outcomes.flatMap((o) => o.list),
+    failures: outcomes
+      .filter((o) => !o.ok)
+      .map((o) => ({ sourceKey: o.sourceKey, error: o.error || '请求失败', timedOut: o.timedOut })),
+  };
 }
 
 /** 聚合搜索流式消费：逐源回调 + 最终聚合结果（NDJSON 行协议，同 liveProbeStream） */

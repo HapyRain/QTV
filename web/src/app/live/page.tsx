@@ -2,15 +2,17 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
+import { useQueries } from '@tanstack/react-query';
 import dynamic from 'next/dynamic';
 import { api } from '@/lib/client-api';
 import { copyToClipboard } from '@/lib/clipboard';
 import { Header, requestShowSettings } from '@/components/header';
 import { LiveChannelList, type LiveChannelItem } from '@/components/live-channel-list';
 import { LiveEpgPanel } from '@/components/live-epg-panel';
+import { DesktopLive } from '@/components/desktop/live/desktop-live';
 import { Spinner } from '@/components/states';
 import { allLiveSources, useAppStore } from '@/lib/store';
+import { useDesktopMode } from '@/lib/desktop';
 import { cn } from '@/lib/utils';
 import { SmartImage } from '@/components/smart-image';
 import { Icon } from '@/components/icon';
@@ -42,6 +44,8 @@ export default function LivePage() {
 function LiveContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const desktopMode = useDesktopMode();
+  const desktop = desktopMode === 'desktop';
   const { toast } = useToast();
   const liveSelectedUrls = useAppStore((s) => s.liveSelectedUrls);
   const liveEnvSources = useAppStore((s) => s.liveEnvSources);
@@ -63,36 +67,38 @@ function LiveContent() {
     return allLiveSources({ liveEnvSources, liveSubscriptions }).filter((s) => selected.has(s.url));
   }, [liveSelectedUrls, liveEnvSources, liveSubscriptions]);
 
-  const playlistsQuery = useQuery({
-    queryKey: ['livePlaylists', sources.map((s) => s.url).join('|')],
-    queryFn: async () => {
-      const results = await Promise.allSettled(sources.map((s) => api.livePlaylist(s.url)));
-      return sources.map((source, i) => ({ source, result: results[i] }));
-    },
-    enabled: sources.length > 0,
-    staleTime: 10 * 60_000,
+  // 每个源单独查询：谁先回来谁先上屏，2000+ 频道不用等全部源拉完
+  const playlistQueries = useQueries({
+    queries: sources.map((source) => ({
+      queryKey: ['livePlaylist', source.url],
+      queryFn: () => api.livePlaylist(source.url),
+      enabled: sources.length > 0,
+      staleTime: 10 * 60_000,
+    })),
   });
+  const loadedSources = playlistQueries.filter((q) => q.data).length;
+  const failedCount = playlistQueries.filter((q) => q.isError).length;
+  const isLoading = sources.length > 0 && playlistQueries.some((q) => q.isLoading);
+  const playlistSignature = playlistQueries.map((q) => q.dataUpdatedAt).join('|');
 
-  const { channels, groups, failedCount } = useMemo(() => {
+  const { channels, groups } = useMemo(() => {
     const list: LiveChannelItem[] = [];
     const seen = new Set<string>();
-    let failed = 0;
-    for (const { source, result } of playlistsQuery.data ?? []) {
-      if (result.status !== 'fulfilled') {
-        failed++;
-        continue;
-      }
-      for (const c of result.value.channels) {
+    playlistQueries.forEach((q, i) => {
+      if (!q.data) return;
+      const source = sources[i];
+      for (const c of q.data.channels) {
         if (seen.has(c.url)) continue;
         seen.add(c.url);
         list.push({ ...c, epg: source.epg, sourceUrl: source.url });
       }
-    }
-    const groups = [...new Set(list.map((c) => c.group).filter((g): g is string => Boolean(g)))].sort(
+    });
+    const groupList = [...new Set(list.map((c) => c.group).filter((g): g is string => Boolean(g)))].sort(
       (a, b) => a.localeCompare(b, 'zh')
     );
-    return { channels: list, groups, failedCount: failed };
-  }, [playlistsQuery.data]);
+    return { channels: list, groups: groupList };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playlistSignature, sources]);
 
   const currentUrl = searchParams.get('url') || '';
   const currentChannel = useMemo(() => {
@@ -168,6 +174,34 @@ function LiveContent() {
   const logo = currentChannel?.logo;
   const isFavorite = currentChannel ? liveFavorites.includes(currentChannel.url) : false;
 
+  // 选中了频道时同样要等判定完成，否则 LivePlayer 会先按移动端挂载再重挂
+  if (desktopMode === 'pending' && currentUrl) {
+    return <div className="min-h-[100dvh] bg-page" />;
+  }
+
+  if (desktop) {
+    return (
+      <>
+        <DesktopLive
+          channels={channels}
+          groups={groups}
+          currentUrl={currentUrl}
+          currentChannel={currentChannel}
+          loading={isLoading}
+          loadedSources={loadedSources}
+          sourceCount={sources.length}
+          failedCount={failedCount}
+          volumeBoost={volumeBoost}
+          onSelect={selectChannel}
+          onFilteredChange={handleFilteredChange}
+          onPrevChannel={goPrevChannel}
+          onNextChannel={goNextChannel}
+        />
+        <Header />
+      </>
+    );
+  }
+
   return (
     <div className="h-[100dvh] flex flex-col overflow-hidden bg-page pb-tabbar">
       {/* 上半屏固定置顶：沉浸黑底安全区 + 16:9 播放器 + 紧凑控制栏 */}
@@ -192,8 +226,8 @@ function LiveContent() {
                   ? liveEnvSources.length + liveSubscriptions.length > 0
                     ? '当前直播源未勾选启用，请点击下方按钮开启'
                     : '尚未配置 M3U 直播源，添加后即可观看卫视频道'
-                  : playlistsQuery.isLoading
-                    ? '正在同步频道列表...'
+                  : isLoading
+                    ? `正在同步频道列表... ${loadedSources}/${sources.length} 个源`
                     : `已就绪 ${channels.length} 个频道，点按下方列表即刻开播`}
               </p>
               {sources.length === 0 && (
@@ -338,13 +372,26 @@ function LiveContent() {
             </div>
             <LiveEpgPanel epgUrl={currentChannel.epg} tvgId={currentChannel.tvgId} />
           </div>
-        ) : playlistsQuery.isLoading && channels.length === 0 ? (
+        ) : isLoading && channels.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-2">
             <Spinner size="lg" />
             <span className="text-xs text-faint">正在加载频道列表...</span>
           </div>
         ) : (
           <div className="flex-1 min-h-0 flex flex-col">
+            {isLoading && (
+              <div className="shrink-0 px-3 pt-2 pb-1">
+                <div className="h-1 rounded-full bg-chip overflow-hidden">
+                  <div
+                    className="h-full bg-accent transition-all duration-300"
+                    style={{ width: `${sources.length ? Math.round((loadedSources / sources.length) * 100) : 0}%` }}
+                  />
+                </div>
+                <div className="mt-1 text-[10px] text-faint num">
+                  正在加载频道：{loadedSources}/{sources.length} 个源 · 已就绪 {channels.length} 个
+                </div>
+              </div>
+            )}
             <LiveChannelList
               channels={channels}
               groups={groups}

@@ -16,6 +16,12 @@ interface NativeSaveBridge {
   saveChunk(b64: string): void;
   saveEnd(): boolean;
   saveAbort?(): void;
+  /** 上一次成功保存的位置（Android content://、iOS/Windows 绝对路径）；无则空串 */
+  getLastSavedPath?(): string;
+  /** 用系统能力打开已保存文件（播放） */
+  openSavedFile?(path: string): boolean;
+  /** 打开下载目录（桌面端支持；移动端通常返回 false） */
+  openDownloadFolder?(): boolean;
 }
 
 /** 原生保存桥存在时返回它（Android WebView 壳），否则 null */
@@ -52,6 +58,8 @@ export interface SaveTarget {
   write(data: Uint8Array): Promise<void>;
   close(): Promise<void>;
   abort(): Promise<void>;
+  /** 保存完成后可拿到的文件定位符；内存导出 / 浏览器下载没有稳定位置，返回 null */
+  getSavedPath?(): string | null;
 }
 
 export function supportsFileSystemAccess(): boolean {
@@ -81,6 +89,7 @@ export function nativeSaveTarget(filename: string): SaveTarget {
   const bridge = nativeSaveBridge();
   if (!bridge) throw new Error('当前环境不支持原生保存');
   let opened = false;
+  let savedPath = '';
   const ensureOpen = () => {
     if (opened) return;
     opened = true;
@@ -98,6 +107,22 @@ export function nativeSaveTarget(filename: string): SaveTarget {
       ensureOpen();
       opened = false;
       if (!bridge.saveEnd()) throw new Error('保存到设备失败');
+      // 原生桥在 finish 之后才知道最终落盘位置：没有这个值前端就无法给出「播放/打开」入口。
+      // iOS 走 messageHandler（异步），路径要等原生处理完 end 再回写，因此这里短轮询一下；
+      // Android/Windows 是同步桥，第一次就能拿到。
+      savedPath = '';
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          savedPath = bridge.getLastSavedPath?.() || '';
+        } catch {
+          savedPath = '';
+        }
+        if (savedPath) break;
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+    },
+    getSavedPath() {
+      return savedPath || null;
     },
     async abort() {
       opened = false;

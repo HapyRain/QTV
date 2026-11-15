@@ -81,11 +81,14 @@ final class LocalHttpServer {
                 let rawTarget = parts[1]
 
                 var contentLength = 0
+                var rangeHeader: String?
                 for line in lines.dropFirst() {
                     let lower = line.lowercased()
                     if lower.hasPrefix("content-length:") {
                         let val = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
                         contentLength = Int(val) ?? 0
+                    } else if lower.hasPrefix("range:") {
+                        rangeHeader = line.dropFirst("range:".count).trimmingCharacters(in: .whitespaces)
                     }
                 }
 
@@ -99,7 +102,7 @@ final class LocalHttpServer {
                     ? accumulated.subdata(in: bodyStart..<(bodyStart + contentLength))
                     : Data()
 
-                self.dispatchRequest(method: method, rawTarget: rawTarget, bodyData: bodyData, conn: conn)
+                self.dispatchRequest(method: method, rawTarget: rawTarget, bodyData: bodyData, rangeHeader: rangeHeader, conn: conn)
             } else if isComplete || error != nil || accumulated.count > 262_144 {
                 conn.cancel()
             } else {
@@ -108,7 +111,7 @@ final class LocalHttpServer {
         }
     }
 
-    private func dispatchRequest(method: String, rawTarget: String, bodyData: Data, conn: NWConnection) {
+    private func dispatchRequest(method: String, rawTarget: String, bodyData: Data, rangeHeader: String?, conn: NWConnection) {
         if method == "OPTIONS" {
             sendResponse(conn: conn, status: "204 No Content", contentType: "text/plain", body: Data())
             return
@@ -119,7 +122,7 @@ final class LocalHttpServer {
         }
         let path = url.path.isEmpty ? "/" : url.path
         if path.hasPrefix("/api/") {
-            handleApiRequest(method: method, url: url, bodyData: bodyData, conn: conn)
+            handleApiRequest(method: method, url: url, bodyData: bodyData, rangeHeader: rangeHeader, conn: conn)
         } else {
             serveStaticFile(path: path, conn: conn)
         }
@@ -186,7 +189,7 @@ final class LocalHttpServer {
 
     // MARK: - API 处理
 
-    private func handleApiRequest(method: String, url: URL, bodyData: Data, conn: NWConnection) {
+    private func handleApiRequest(method: String, url: URL, bodyData: Data, rangeHeader: String?, conn: NWConnection) {
         let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let query = comps?.queryItems ?? []
         func qParam(_ name: String) -> String? {
@@ -329,6 +332,9 @@ final class LocalHttpServer {
 
         case "/api/proxy", "/api/live/stream":
             handleProxy(targetUrl: qParam("url"), adFilter: qBool("adFilter"), conn: conn)
+
+        case "/api/local-file":
+            handleLocalFile(method: method, path: qParam("path"), rangeHeader: rangeHeader, conn: conn)
 
         case "/api/douban", "/api/hot-list":
             sendJson(conn: conn, obj: ["items": []])
@@ -672,6 +678,136 @@ final class LocalHttpServer {
         if p.hasSuffix(".webp") { return "image/webp" }
         if p.hasSuffix(".gif") { return "image/gif" }
         return "application/octet-stream"
+    }
+
+    // MARK: - 已缓存文件播放 (`/api/local-file`，支持 Range 拖动)
+
+    private func handleLocalFile(method: String, path: String?, rangeHeader: String?, conn: NWConnection) {
+        guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            sendJsonError(conn: conn, code: 400, message: "缺少 path")
+            return
+        }
+        // 只允许 Documents/Downloads 内的文件：两侧都解析符号链接（iOS 上 /var -> /private/var），防目录穿越
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            sendJsonError(conn: conn, code: 404, message: "Not found")
+            return
+        }
+        let downloadsPath = docs.appendingPathComponent("Downloads", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let fileURL = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL
+        guard fileURL.path.hasPrefix(downloadsPath + "/") else {
+            sendJsonError(conn: conn, code: 403, message: "Forbidden")
+            return
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let sizeNum = attrs[.size] as? NSNumber else {
+            sendJsonError(conn: conn, code: 404, message: "Not found")
+            return
+        }
+        let size = sizeNum.int64Value
+
+        // 空文件（保存失败/刚创建）：按 200 + 0 长度回，避免 Range 判定成 416
+        if size == 0 {
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 0\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            conn.send(content: Data(head.utf8), isComplete: true, completion: .contentProcessed { _ in conn.cancel() })
+            return
+        }
+
+        var start: Int64 = 0
+        var end = size - 1
+        var isPartial = false
+        if let rawRange = rangeHeader, rawRange.lowercased().hasPrefix("bytes=") {
+            // 只取第一段 `bytes=start-end` / `bytes=start-` / `bytes=-suffix`
+            let spec = String(rawRange.dropFirst("bytes=".count)).components(separatedBy: ",")[0]
+                .trimmingCharacters(in: .whitespaces)
+            let bounds = spec.components(separatedBy: "-")
+            if bounds.count == 2 {
+                let first = bounds[0].trimmingCharacters(in: .whitespaces)
+                let last = bounds[1].trimmingCharacters(in: .whitespaces)
+                if first.isEmpty {
+                    if let suffix = Int64(last), suffix > 0 {
+                        start = max(0, size - suffix)
+                        end = size - 1
+                        isPartial = true
+                    }
+                } else if let from = Int64(first), from >= 0 {
+                    start = from
+                    end = last.isEmpty ? size - 1 : min(Int64(last) ?? (size - 1), size - 1)
+                    isPartial = true
+                }
+            }
+            if isPartial && (start >= size || start > end) {
+                let head = "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */\(size)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                conn.send(content: Data(head.utf8), isComplete: true, completion: .contentProcessed { _ in conn.cancel() })
+                return
+            }
+            // 无法解析的 Range：忽略，按全量 200 返回（兼容不规范的播放器）
+            if !isPartial {
+                start = 0
+                end = size - 1
+            }
+        }
+
+        // 已缓存文件只可能是保存桥写入的 MP4
+        var headerLines = [
+            "HTTP/1.1 \(isPartial ? "206 Partial Content" : "200 OK")",
+            "Content-Type: video/mp4",
+            "Content-Length: \(end - start + 1)",
+            "Accept-Ranges: bytes",
+            "Access-Control-Allow-Origin: *",
+            "Cache-Control: no-store",
+            "Connection: close"
+        ]
+        if isPartial {
+            headerLines.insert("Content-Range: bytes \(start)-\(end)/\(size)", at: 2)
+        }
+        let headerData = Data((headerLines.joined(separator: "\r\n") + "\r\n\r\n").utf8)
+
+        // HEAD 只要头部
+        if method == "HEAD" {
+            conn.send(content: headerData, isComplete: true, completion: .contentProcessed { _ in conn.cancel() })
+            return
+        }
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+            sendJsonError(conn: conn, code: 404, message: "Not found")
+            return
+        }
+        do {
+            try handle.seek(toOffset: UInt64(start))
+        } catch {
+            try? handle.close()
+            sendJsonError(conn: conn, code: 404, message: "Not found")
+            return
+        }
+        conn.send(content: headerData, isComplete: false, completion: .idempotent)
+        streamFile(handle, conn: conn, remaining: end - start + 1)
+    }
+
+    /// 256KB 分块写回：每块 .contentProcessed 后再读下一块，既不走内存也不无界堆积在 socket 缓冲
+    private func streamFile(_ handle: FileHandle, conn: NWConnection, remaining: Int64) {
+        if remaining <= 0 {
+            try? handle.close()
+            conn.send(content: Data(), isComplete: true, completion: .contentProcessed { _ in conn.cancel() })
+            return
+        }
+        let want = Int(min(262_144, remaining))
+        guard let chunk = try? handle.read(upToCount: want), !chunk.isEmpty else {
+            try? handle.close()
+            conn.cancel()
+            return
+        }
+        let left = remaining - Int64(chunk.count)
+        conn.send(content: chunk, isComplete: left <= 0, completion: .contentProcessed { [weak self] error in
+            if error != nil || left <= 0 {
+                // 最后一块已发出，或客户端断开/超时：关句柄，别再多发
+                try? handle.close()
+                conn.cancel()
+                return
+            }
+            self?.streamFile(handle, conn: conn, remaining: left)
+        })
     }
 
     // MARK: - HTTP 响应发送

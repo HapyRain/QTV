@@ -11,7 +11,9 @@
  *   4. Service Worker 置空（WebView 下会干扰原生请求拦截）
  *   5. 给所有 HTML 注入 fetch 补丁：POST → GET + base64 __body
  *      （Android shouldInterceptRequest 与 iOS WKURLSchemeHandler 读不到 POST body）
- *   6. out/ 同时同步到 Android (app/src/main/assets/www) 与 iOS (ios/QTV/Resources/www)
+ *   6. out/ 同时同步到 Android (app/src/main/assets/www)、iOS (ios/QTV/Resources/www)
+ *      与 Windows 桌面端 (windows/www)——三端共用同一份静态产物，桌面形态由运行时
+ *      window.QTVDesktop 判定（见 web/src/lib/desktop.ts），源码只有一套。
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -25,6 +27,7 @@ const buildDir = path.join(root, '.web-build');
 const outDir = path.join(buildDir, 'out');
 const androidWwwDir = path.join(root, 'app', 'src', 'main', 'assets', 'www');
 const iosWwwDir = path.join(root, 'ios', 'QTV', 'Resources', 'www');
+const windowsWwwDir = path.join(root, 'windows', 'www');
 
 const log = (msg) => console.log(msg);
 const fail = (msg) => {
@@ -116,7 +119,7 @@ if (!fs.existsSync(path.join(outDir, 'index.html'))) fail('静态导出失败：
 // 4) 注入 fetch 补丁
 log('[4/6] 注入 fetch 补丁（POST → GET + base64 __body）…');
 const patch =
-  '<script>(function(){var o=window.fetch;window.fetch=function(i,x){try{var m=((x&&x.method)||(i&&i.method)||"GET").toUpperCase();var u=(typeof i==="string")?i:(i&&i.url);if(m==="POST"&&u&&u.indexOf("/api/")>-1&&x&&typeof x.body==="string"){var enc=new TextEncoder().encode(x.body);var bin="";for(var k=0;k<enc.length;k++)bin+=String.fromCharCode(enc[k]);var a=new URL(u,location.href);a.searchParams.set("__body",btoa(bin));a.searchParams.set("__bodyEnc","1");var o2=Object.assign({},x,{method:"GET"});delete o2.body;if(o2.headers){try{delete o2.headers["Content-Type"];delete o2.headers["content-type"];}catch(e){}}return o(a.pathname+a.search,o2);}}catch(e){}return o(i,x);};})();</script>';
+  '<script>(function(){if(window.QTVDesktop&&window.QTVDesktop.isDesktop)return;var o=window.fetch;window.fetch=function(i,x){try{var m=((x&&x.method)||(i&&i.method)||"GET").toUpperCase();var u=(typeof i==="string")?i:(i&&i.url);if(m==="POST"&&u&&u.indexOf("/api/")>-1&&x&&typeof x.body==="string"){var enc=new TextEncoder().encode(x.body);var bin="";for(var k=0;k<enc.length;k++)bin+=String.fromCharCode(enc[k]);var a=new URL(u,location.href);a.searchParams.set("__body",btoa(bin));a.searchParams.set("__bodyEnc","1");var o2=Object.assign({},x,{method:"GET"});delete o2.body;if(o2.headers){try{delete o2.headers["Content-Type"];delete o2.headers["content-type"];}catch(e){}}return o(a.pathname+a.search,o2);}}catch(e){}return o(i,x);};})();</script>';
 for (const rel of walk(outDir).filter((f) => f.endsWith('.html'))) {
   const file = path.join(outDir, rel);
   let html = fs.readFileSync(file, 'utf8');
@@ -127,8 +130,8 @@ for (const rel of walk(outDir).filter((f) => f.endsWith('.html'))) {
   log(`  patched: ${rel}`);
 }
 
-// 5) 同步到 Android 与 iOS 资产目录
-log('[5/6] 同步到 Android (app/src/main/assets/www) 与 iOS (ios/QTV/Resources/www)…');
+// 5) 同步到三端资产目录
+log('[5/6] 同步到 Android、iOS 与 Windows 桌面端资产目录…');
 fs.rmSync(androidWwwDir, { recursive: true, force: true });
 fs.cpSync(outDir, androidWwwDir, { recursive: true });
 
@@ -138,8 +141,15 @@ if (fs.existsSync(path.join(root, 'ios'))) {
   fs.cpSync(outDir, iosWwwDir, { recursive: true });
 }
 
+if (fs.existsSync(path.join(root, 'windows'))) {
+  fs.rmSync(windowsWwwDir, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(windowsWwwDir), { recursive: true });
+  fs.cpSync(outDir, windowsWwwDir, { recursive: true });
+}
+
 const count = walk(androidWwwDir).length;
 const bytes = walk(androidWwwDir).reduce((sum, f) => sum + fs.statSync(path.join(androidWwwDir, f)).size, 0);
 log(`[6/6] 完成：${count} 个文件，${(bytes / 1024 / 1024).toFixed(2)} MB`);
 log('Android 构建：./gradlew :app:assembleDebug');
 log('iOS 构建：使用 Xcode 打开 ios/QTV.xcodeproj 或通过 GitHub Actions 构建 IPA');
+log('Windows 构建：cd windows && npm ci && npx electron-builder --win --x64（或 scripts/build-windows.ps1）');

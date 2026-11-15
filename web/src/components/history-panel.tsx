@@ -29,7 +29,7 @@ import { resolveSource, useAppStore } from '@/lib/store';
 /** 未搜索时列表默认展示的条数（DB 实存 MAX_HISTORY 条，其余靠搜索查阅） */
 const VISIBLE_LIMIT = 50;
 
-export function HistoryPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function HistoryPanel({ open, onClose, inline = false }: { open: boolean; onClose: () => void; inline?: boolean }) {
   // 全量读取（上限即 DB 淘汰上限）：默认只渲染最近若干条，搜索时覆盖更早的记录
   const history = useLiveQuery(
     () => db.history.orderBy('timestamp').reverse().limit(MAX_HISTORY).toArray(),
@@ -59,6 +59,8 @@ export function HistoryPanel({ open, onClose }: { open: boolean; onClose: () => 
       onClose={onClose}
       title="观看历史"
       width="max-w-lg"
+      inline={inline}
+      header={!inline}
       // 搜索框放在固定副标题栏：历史较长时滚动列表仍可随时改关键字
       subheader={
         total > 0 ? (

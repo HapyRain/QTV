@@ -215,7 +215,7 @@ final class LocalApiHandler: NSObject, WKURLSchemeHandler {
             handleProxy(url: url, targetUrl: qParam("url"), adFilter: qBool("adFilter"), task: task)
 
         case "/api/douban", "/api/hot-list":
-            sendJson(task, url: url, obj: ["items": []])
+            handleDouban(url: url, qParam: qParam, task: task)
 
         case "/api/bangumi/calendar":
             sendJson(task, url: url, obj: ["days": []])
@@ -244,6 +244,54 @@ final class LocalApiHandler: NSObject, WKURLSchemeHandler {
         let data = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         let resp = makeHttpResponse(url: url, statusCode: statusCode, contentType: "application/json; charset=utf-8", contentLength: data.count)
         completeTask(task, response: resp, data: data)
+    }
+
+    // MARK: - /api/douban
+
+    /// 豆瓣热播：与 Android/Windows 同一套 rexxar 接口与移动 UA/Referer
+    private func handleDouban(url: URL, qParam: (String) -> String?, task: WKURLSchemeTask) {
+        let type = qParam("type") ?? "tv"
+        let start = max(0, min(200, Int(qParam("pageStart") ?? "") ?? 0))
+        let count = max(1, min(50, Int(qParam("pageSize") ?? "") ?? 20))
+        let collection = type == "movie" ? "movie" : "tv"
+        guard let target = URL(string: "https://m.douban.com/rexxar/api/v2/subject_collection/\(collection)_hot/items?start=\(start)&count=\(count)") else {
+            sendJson(task, url: url, obj: ["items": []])
+            return
+        }
+        var req = URLRequest(url: target)
+        req.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        req.setValue("https://m.douban.com/", forHTTPHeaderField: "Referer")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            var items: [[String: Any]] = []
+            if let data,
+               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let list = root["subject_collection_items"] as? [[String: Any]] {
+                for o in list {
+                    guard let title = o["title"] as? String, !title.isEmpty else { continue }
+                    var item: [String: Any] = [
+                        "id": o["id"] as? String ?? "",
+                        "title": title,
+                        "cover": "",
+                        "isTv": collection == "tv",
+                    ]
+                    if let pic = o["pic"] as? [String: Any] {
+                        item["cover"] = (pic["large"] as? String) ?? (pic["normal"] as? String) ?? ""
+                    } else if let cover = o["cover"] as? [String: Any] {
+                        item["cover"] = cover["url"] as? String ?? ""
+                    }
+                    if let rating = o["rating"] as? [String: Any],
+                       let value = rating["value"] as? Double, value > 0 {
+                        item["rating"] = String(format: "%.1f", value)
+                    }
+                    items.append(item)
+                }
+            }
+            self?.sendJson(task, url: url, obj: ["items": items])
+        }.resume()
     }
 
     // MARK: - /api/player-state

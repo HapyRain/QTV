@@ -33,6 +33,11 @@ export interface AddDownloadPayload {
   url: string;
   title: string;
   format?: 'TS' | 'MP4';
+  /** 用于回到播放页时命中离线播放 */
+  episodeKey?: string;
+  sourceKey?: string;
+  vodId?: string;
+  episodeIndex?: number;
 }
 
 interface RunningHandle {
@@ -42,6 +47,30 @@ interface RunningHandle {
 
 const filenameOf = (entry: { title: string; format?: string }) =>
   `${entry.title}.${(entry.format ?? 'MP4').toLowerCase()}`;
+
+/** 路径只用于展示：Windows 反斜杠、Android content://、iOS 绝对路径都要能取到末段 */
+const filenameFromPath = (p: string): string => p.split(/[\\\\/]/).filter(Boolean).pop() || p;
+
+/** 已完成任务的两个动作：播放已保存文件 / 打开下载目录（能力由平台桥决定） */
+function openCachedFile(path: string): boolean {
+  const bridge = nativeSaveBridge();
+  if (!bridge?.openSavedFile) return false;
+  try {
+    return Boolean(bridge.openSavedFile(path));
+  } catch {
+    return false;
+  }
+}
+
+function openDownloadsFolder(): boolean {
+  const bridge = nativeSaveBridge();
+  if (!bridge?.openDownloadFolder) return false;
+  try {
+    return Boolean(bridge.openDownloadFolder());
+  } catch {
+    return false;
+  }
+}
 
 const pendingTargets = new Map<string, SaveTarget>();
 
@@ -111,7 +140,9 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
 
       void job
         .then(async () => {
-          await updateEntry(entry.id, { status: 'completed' });
+          // 原生桥只在这时才知道文件落在哪：记进库，离线播放与「打开」入口都靠它
+          const savedPath = target.getSavedPath?.() ?? undefined;
+          await updateEntry(entry.id, { status: 'completed', filePath: savedPath });
           void clearDownloadChunks(entry.id);
           toast(`《${entry.title}》下载完成`, 'success');
         })
@@ -165,6 +196,10 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
           errorNum: 0,
           createdAt: Date.now(),
           updatedAt: Date.now(),
+          episodeKey: detail.episodeKey,
+          sourceKey: detail.sourceKey,
+          vodId: detail.vodId,
+          episodeIndex: detail.episodeIndex,
         };
         let target: SaveTarget;
         try {
@@ -203,12 +238,12 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
   const onToggleProxy = (next: boolean) => {
     setProxy(saveDownloadSettings({ proxy: next }).proxy);
     toast(
-      next ? '已开启代理增强下载，新任务经内置通道加速' : '已切换为源站直连下载',
+      next ? '已开启下载加速，新任务会更快' : '已关闭下载加速',
       'info'
     );
   };
 
-  const onPauseResume = async (entry: DownloadTaskEntry) => {
+  async function onPauseResumeHandler(entry: DownloadTaskEntry) {
     const handle = running.current.get(entry.id);
     if (handle && entry.status === 'downloading') {
       handle.pause.pause();
@@ -233,7 +268,7 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
     void handle;
   };
 
-  const onCancel = async (entry: DownloadTaskEntry) => {
+  async function onCancelHandler(entry: DownloadTaskEntry) {
     running.current.get(entry.id)?.abort.abort();
     running.current.delete(entry.id);
     await clearDownloadChunks(entry.id);
@@ -246,6 +281,29 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
       'info'
     );
   };
+
+  // 整页缓存中心通过这几个事件操作队列：队列引擎只保留一份（GlobalDownloadManager），
+  // 页面不自己再起一套调度，避免同一任务被下载两次。
+  useEffect(() => {
+    const findEntry = (id: string) => tasks.find((t) => t.id === id);
+    const onPauseResume = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      const entry = findEntry(id);
+      if (entry) void onPauseResumeHandler(entry);
+    };
+    const onCancel = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      const entry = findEntry(id);
+      if (entry) void onCancelHandler(entry);
+    };
+    window.addEventListener('qtv:download-pause-resume', onPauseResume);
+    window.addEventListener('qtv:download-cancel', onCancel);
+    return () => {
+      window.removeEventListener('qtv:download-pause-resume', onPauseResume);
+      window.removeEventListener('qtv:download-cancel', onCancel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks]);
 
   const statusLabel: Record<DownloadTaskEntry['status'], string> = {
     waiting: '排队中',
@@ -260,22 +318,22 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
       <div className="space-y-3">
         <div className="card p-3.5 flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-sm font-medium text-content">内置代理加速模式</p>
+            <p className="text-sm font-medium text-content">下载加速</p>
             <p className="text-xs text-faint mt-0.5 leading-relaxed">
-              遇到防盗链或直连缓慢时开启，自动通过本地代理通道拉取分片与密钥（仅对新任务生效）。
+              网络不稳或下载很慢时开启，会换更稳的线路重试（仅对新任务生效）。
             </p>
           </div>
-          <Switch checked={proxy} onChange={onToggleProxy} label="内置代理加速模式" />
+          <Switch checked={proxy} onChange={onToggleProxy} label="下载加速" />
         </div>
         <div className="flex items-center justify-between text-[11px] text-faint px-1 tabular-nums">
           <span>
             存储模式：
             {capability === 'native'
-              ? '本机流式直存（自动写入系统下载目录）'
+              ? '直接保存到系统下载目录'
               : capability === 'fs-access'
                 ? '本地文件直写'
                 : '本机聚合导出'}
-            {chunkCache ? ' · 支持分片续传' : ''}
+            {chunkCache ? ' · 支持断点续传' : ''}
           </span>
           <span>
             并发 {Math.min(running.current.size, MAX_CONCURRENT_DOWNLOADS)}/{MAX_CONCURRENT_DOWNLOADS}
@@ -288,6 +346,7 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
         )}
         {tasks.map((t) => {
           const pct = t.total > 0 ? Math.min(100, Math.round((t.finished / t.total) * 100)) : 0;
+          const savedPath = t.status === 'completed' ? t.filePath : undefined;
           return (
             <div key={t.id} className="card p-3.5 space-y-2.5">
               <div className="flex items-start justify-between gap-2">
@@ -295,7 +354,7 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
                   <p className="text-sm font-medium text-content truncate">{t.title}</p>
                   <p className="text-xs text-faint tabular-nums mt-0.5">
                     {t.format.toUpperCase()} · {statusLabel[t.status]}
-                    {t.status === 'downloading' && t.total > 0 ? ` · ${t.finished}/${t.total} 分片 (${pct}%)` : ''}
+                    {t.status === 'downloading' && t.total > 0 ? ` · ${t.finished}/${t.total} (${pct}%)` : ''}
                   </p>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
@@ -303,7 +362,7 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
                     <button
                       type="button"
                       className="px-2.5 py-1 rounded-lg bg-chip hover:bg-hover text-xs text-content transition-colors"
-                      onClick={() => void onPauseResume(t)}
+                      onClick={() => void onPauseResumeHandler(t)}
                     >
                       暂停
                     </button>
@@ -312,7 +371,7 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
                     <button
                       type="button"
                       className="px-2.5 py-1 rounded-lg bg-accent/15 text-accent text-xs font-medium transition-colors"
-                      onClick={() => void onPauseResume(t)}
+                      onClick={() => void onPauseResumeHandler(t)}
                     >
                       继续
                     </button>
@@ -321,7 +380,7 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
                     type="button"
                     aria-label="删除下载任务"
                     className="p-1.5 rounded-lg bg-chip hover:bg-hover text-muted hover:text-danger transition-colors"
-                    onClick={() => void onCancel(t)}
+                    onClick={() => void onCancelHandler(t)}
                   >
                     <Icon name="close" className="w-4 h-4" />
                   </button>
@@ -333,6 +392,35 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
                     className="h-full bg-accent transition-all duration-300"
                     style={{ width: `${pct}%` }}
                   />
+                </div>
+              )}
+              {savedPath && (
+                <div className="flex items-center gap-2 pt-0.5">
+                  <p className="flex-1 min-w-0 text-[11px] text-faint truncate" title={savedPath}>
+                    已保存：{filenameFromPath(savedPath)}
+                  </p>
+                  <button
+                    type="button"
+                    className="shrink-0 px-2.5 py-1 rounded-lg bg-accent/15 text-accent text-xs font-medium"
+                    onClick={() => {
+                      if (!openCachedFile(savedPath)) {
+                        toast('无法直接打开，请在系统文件管理里查看', 'info');
+                      }
+                    }}
+                  >
+                    播放
+                  </button>
+                  <button
+                    type="button"
+                    className="shrink-0 px-2.5 py-1 rounded-lg bg-chip hover:bg-hover text-xs text-content"
+                    onClick={() => {
+                      if (!openDownloadsFolder()) {
+                        toast('请在系统文件管理里查看已下载文件', 'info');
+                      }
+                    }}
+                  >
+                    打开位置
+                  </button>
                 </div>
               )}
             </div>
@@ -348,7 +436,21 @@ export function enqueueDownload(payload: AddDownloadPayload): void {
 }
 
 export function requestShowDownloadManager(): void {
+  // 桌面端已改成 /cache 整页：这里直接跳路由；移动端仍由全局抽屉接管
+  if (typeof window !== 'undefined' && (window as unknown as { QTVDesktop?: unknown }).QTVDesktop) {
+    window.location.assign('/cache');
+    return;
+  }
   window.dispatchEvent(new CustomEvent(SHOW_MANAGER_EVENT));
+}
+
+/** 整页缓存中心操作队列：队列引擎只有 GlobalDownloadManager 一份，页面只发事件 */
+export function pauseResumeDownloadTask(id: string): void {
+  window.dispatchEvent(new CustomEvent('qtv:download-pause-resume', { detail: id }));
+}
+
+export function cancelDownloadTask(id: string): void {
+  window.dispatchEvent(new CustomEvent('qtv:download-cancel', { detail: id }));
 }
 
 export function GlobalDownloadManager() {

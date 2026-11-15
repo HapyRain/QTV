@@ -1,0 +1,583 @@
+/*
+ * 桌面端视觉定稿（对应 mockups 10 影院黑 / 11 象牙白）
+ * - 深色：纯黑画布 + 白色主操作 + 细线分层；浅色：暖白纸感 + 白色卡片。
+ * - 只作用于 html.qtv-desktop，移动端 token 完全不动。
+ * - 组件的 Tailwind 语义色（bg-page/text-content…）由这里的 --c-* 覆写驱动。
+ */
+html.qtv-desktop {
+  --c-page: 244 242 237;          /* #f4f2ed 暖白纸 */
+  --c-surface: 255 255 255;
+  --c-surface-raised: 255 255 255;
+  --c-card: 255 255 255;
+  --c-chip: 236 233 226;
+  --c-hover: 231 227 219;
+  --c-line: 224 219 210;
+  --c-content: 22 24 29;
+  --c-muted: 92 98 112;
+  --c-faint: 141 146 156;
+  --c-accent: 10 132 255;
+  --c-accent-hover: 6 110 220;
+  --c-on-accent: 255 255 255;
+  --c-rating: 185 138 60;
+  --titlebar-h: 52px;
+  --sidebar-w: 232px;
+  --desk-radius: 14px;
+  --desk-spring: cubic-bezier(0.22, 1.12, 0.32, 1);
+  color-scheme: light;
+}
+
+html.qtv-desktop.dark {
+  --c-page: 0 0 0;                /* 纯黑影院 */
+  --c-surface: 16 16 18;
+  --c-surface-raised: 21 21 24;
+  --c-card: 18 18 20;
+  --c-chip: 30 30 34;
+  --c-hover: 40 40 45;
+  --c-line: 45 45 50;
+  --c-content: 244 247 251;
+  --c-muted: 154 163 173;
+  --c-faint: 108 113 122;
+  --c-accent: 96 176 255;
+  --c-accent-hover: 140 200 255;
+  --c-on-accent: 5 16 28;
+  --c-rating: 232 195 126;
+  --shadow-1: 0 2px 8px rgb(0 0 0 / 0.5);
+  --shadow-2: 0 18px 44px -22px rgb(0 0 0 / 0.8);
+  color-scheme: dark;
+}
+
+html.qtv-desktop.dark body {
+  background: #000;
+}
+
+/* ---------- 标题栏与侧栏 ---------- */
+html.qtv-desktop .desktop-titlebar {
+  background: rgb(var(--c-page) / 0.92);
+  border-bottom: 1px solid rgb(var(--c-line) / 0.7);
+  backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+}
+
+html.qtv-desktop .desktop-sidebar {
+  background: rgb(var(--c-page));
+  border-right: 1px solid rgb(var(--c-line) / 0.7);
+  padding: 0;
+}
+
+html.qtv-desktop .deskop-rail-label {
+  padding: 0 12px 8px;
+  font-size: 9.5px;
+  letter-spacing: 0.24em;
+  color: rgb(var(--c-faint));
+  text-transform: uppercase;
+}
+
+html.qtv-desktop .desk-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 11px;
+  color: rgb(var(--c-muted));
+  font-size: 12.5px;
+  font-weight: 500;
+  transition:
+    background var(--dur-1) var(--ease-spring),
+    color var(--dur-1) var(--ease-spring),
+    transform var(--dur-1) var(--ease-spring);
+}
+
+html.qtv-desktop .desk-nav-item:hover {
+  color: rgb(var(--c-content));
+  background: rgb(var(--c-hover) / 0.7);
+}
+
+html.qtv-desktop .desk-nav-item-active {
+  color: rgb(var(--c-content));
+  background: rgb(var(--c-chip));
+  font-weight: 600;
+}
+
+html.qtv-desktop.dark .desk-nav-item-active {
+  background: rgb(255 255 255 / 0.1);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.1);
+}
+
+html.qtv-desktop .desk-mycard {
+  border: 1px solid rgb(var(--c-line) / 0.7);
+  border-radius: 14px;
+  padding: 12px 13px;
+  background: rgb(var(--c-surface));
+}
+
+html.qtv-desktop.dark .desk-mycard {
+  background: rgb(255 255 255 / 0.04);
+  border-color: rgb(255 255 255 / 0.1);
+}
+
+html.qtv-desktop .desk-mycard-btn {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 7px 0;
+  border-radius: 9px;
+  border: 1px solid rgb(var(--c-line) / 0.9);
+  text-align: center;
+  font-size: 11.5px;
+  color: rgb(var(--c-content));
+  transition: background var(--dur-1) var(--ease-spring);
+}
+
+html.qtv-desktop .desk-mycard-btn:hover {
+  background: rgb(var(--c-hover) / 0.8);
+}
+
+/* ---------- 整页容器 ---------- */
+html.qtv-desktop .desk-page {
+  padding: 26px 40px 56px;
+  max-width: 1280px;
+}
+
+html.qtv-desktop .desk-page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 6px 2px 22px;
+}
+
+html.qtv-desktop .desk-kicker {
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  color: rgb(var(--c-faint));
+  text-transform: uppercase;
+}
+
+html.qtv-desktop .desk-page-head h1 {
+  margin: 12px 0 6px;
+  font-size: 32px;
+  line-height: 1.08;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: rgb(var(--c-content));
+}
+
+html.qtv-desktop .desk-page-head p {
+  margin: 0;
+  font-size: 12.5px;
+  color: rgb(var(--c-muted));
+}
+
+html.qtv-desktop .desk-page-actions {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
+/* ---------- 卡片 / 列表 / 行 ---------- */
+html.qtv-desktop .desk-card {
+  position: relative;
+  z-index: 0;
+  border: 1px solid rgb(var(--c-line) / 0.8);
+  border-radius: var(--desk-radius);
+  background: rgb(var(--c-card));
+  /* 不能 overflow:hidden：下拉面板是卡片内的 absolute 浮层，会被裁掉并压到下一张卡下面 */
+  overflow: visible;
+}
+
+html.qtv-desktop .desk-card:focus-within,
+html.qtv-desktop .desk-card:has([role='listbox']) {
+  z-index: 6;
+}
+
+html.qtv-desktop.dark .desk-card {
+  background: rgb(255 255 255 / 0.035);
+  border-color: rgb(255 255 255 / 0.09);
+}
+
+html.qtv-desktop .desk-inline-panel {
+  padding: 4px 0;
+}
+
+html.qtv-desktop .desk-inline-panel > div:first-child:not(:last-child) {
+  border-radius: 0;
+}
+
+html.qtv-desktop .desk-list {
+  display: flex;
+  flex-direction: column;
+}
+
+html.qtv-desktop .desk-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 20px;
+  border-bottom: 1px solid rgb(var(--c-line) / 0.7);
+}
+
+html.qtv-desktop.dark .desk-row {
+  border-bottom-color: rgb(255 255 255 / 0.07);
+}
+
+html.qtv-desktop .desk-row:last-child {
+  border-bottom: 0;
+}
+
+html.qtv-desktop .desk-row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+html.qtv-desktop .desk-row-main b {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgb(var(--c-content));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html.qtv-desktop .desk-row-main span {
+  font-size: 11px;
+  color: rgb(var(--c-faint));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html.qtv-desktop .desk-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+html.qtv-desktop .desk-progress {
+  width: 180px;
+  height: 3px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: rgb(var(--c-line));
+  overflow: hidden;
+}
+
+html.qtv-desktop .desk-progress i {
+  display: block;
+  height: 100%;
+  background: rgb(var(--c-accent));
+  border-radius: inherit;
+  transition: width 0.4s var(--desk-spring);
+}
+
+/* ---------- 按钮 / 分段 ---------- */
+html.qtv-desktop .desk-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgb(var(--c-line) / 1);
+  background: transparent;
+  color: rgb(var(--c-content));
+  font-size: 11.5px;
+  white-space: nowrap;
+  transition:
+    background var(--dur-1) var(--ease-spring),
+    border-color var(--dur-1) var(--ease-spring),
+    transform var(--dur-1) var(--ease-spring);
+}
+
+html.qtv-desktop .desk-btn:hover {
+  background: rgb(var(--c-hover) / 0.7);
+  transform: translateY(-1px);
+}
+
+html.qtv-desktop .desk-btn-primary {
+  background: rgb(var(--c-accent));
+  border-color: transparent;
+  color: rgb(var(--c-on-accent));
+  font-weight: 600;
+}
+
+html.qtv-desktop .desk-btn-primary:hover {
+  background: rgb(var(--c-accent-hover));
+}
+
+html.qtv-desktop .desk-btn-danger {
+  color: rgb(var(--c-danger));
+}
+
+html.qtv-desktop .desk-seg {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgb(var(--c-chip));
+  gap: 2px;
+}
+
+html.qtv-desktop .desk-seg button {
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: rgb(var(--c-muted));
+  transition: background var(--dur-1) var(--ease-spring), color var(--dur-1) var(--ease-spring);
+}
+
+html.qtv-desktop .desk-seg-on {
+  background: rgb(var(--c-surface));
+  color: rgb(var(--c-content));
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
+}
+
+/* ---------- 页签 / 统计 / 设置 ---------- */
+html.qtv-desktop .desk-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 0 2px 16px;
+}
+
+html.qtv-desktop .desk-tab {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid rgb(var(--c-line));
+  font-size: 11.5px;
+  color: rgb(var(--c-muted));
+  transition: all var(--dur-1) var(--ease-spring);
+}
+
+html.qtv-desktop .desk-tab:hover {
+  color: rgb(var(--c-content));
+}
+
+html.qtv-desktop .desk-tab-on {
+  background: rgb(var(--c-content));
+  border-color: rgb(var(--c-content));
+  color: rgb(var(--c-page));
+  font-weight: 600;
+}
+
+html.qtv-desktop .desk-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+html.qtv-desktop .desk-stat {
+  border: 1px solid rgb(var(--c-line) / 0.8);
+  border-radius: var(--desk-radius);
+  background: rgb(var(--c-card));
+  padding: 16px 18px;
+}
+
+html.qtv-desktop.dark .desk-stat {
+  background: rgb(255 255 255 / 0.035);
+  border-color: rgb(255 255 255 / 0.09);
+}
+
+html.qtv-desktop .desk-stat .k {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: rgb(var(--c-faint));
+  text-transform: uppercase;
+}
+
+html.qtv-desktop .desk-stat .v {
+  margin-top: 8px;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: rgb(var(--c-content));
+}
+
+html.qtv-desktop .desk-stat .v small {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: rgb(var(--c-muted));
+}
+
+html.qtv-desktop .desk-panel {
+  padding: 20px 22px;
+}
+
+html.qtv-desktop .desk-section {
+  padding: 20px 22px;
+  margin-bottom: 14px;
+}
+
+html.qtv-desktop .desk-section > h2 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: rgb(var(--c-muted));
+}
+
+html.qtv-desktop .desk-section > p {
+  margin: 0 0 4px;
+  font-size: 11.5px;
+  color: rgb(var(--c-faint));
+}
+
+html.qtv-desktop .desk-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 0;
+  border-top: 1px solid rgb(var(--c-line) / 0.7);
+}
+
+html.qtv-desktop .desk-field:first-of-type {
+  border-top: 0;
+}
+
+html.qtv-desktop .desk-field b {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: rgb(var(--c-content));
+}
+
+html.qtv-desktop .desk-field span {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: rgb(var(--c-faint));
+}
+
+html.qtv-desktop .desk-empty {
+  padding: 56px 24px;
+  text-align: center;
+  font-size: 12.5px;
+  color: rgb(var(--c-faint));
+}
+
+/* ---------- 通用动效 ---------- */
+html.qtv-desktop .desk-page {
+  animation: deskPageIn 0.5s var(--ease-spring) both;
+}
+
+@keyframes deskPageIn {
+  from {
+    opacity: 0.78;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.qtv-desktop .desk-page {
+    animation: none;
+  }
+  html.qtv-desktop .desk-nav-item,
+  html.qtv-desktop .desk-btn {
+    transition-duration: 0.01ms;
+  }
+}
+
+/* ---------- 首页 hero ---------- */
+html.qtv-desktop .desk-hero {
+  position: relative;
+  height: 360px;
+  margin: 0 0 26px;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgb(var(--c-line) / 0.8);
+  isolation: isolate;
+}
+
+html.qtv-desktop .desk-hero-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: saturate(1.06) brightness(0.85);
+  z-index: 0;
+}
+
+html.qtv-desktop .desk-hero-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    linear-gradient(90deg, rgb(0 0 0 / 0.86) 0%, rgb(0 0 0 / 0.42) 46%, rgb(0 0 0 / 0.05) 74%, rgb(0 0 0 / 0.3) 100%),
+    linear-gradient(0deg, #000 2%, transparent 56%);
+}
+
+html.qtv-desktop:not(.dark) .desk-hero-scrim {
+  background:
+    linear-gradient(90deg, rgb(244 242 237 / 0.97) 0%, rgb(244 242 237 / 0.82) 38%, rgb(244 242 237 / 0.16) 70%, rgb(244 242 237 / 0.42) 100%),
+    linear-gradient(0deg, #f4f2ed 2%, transparent 56%);
+}
+
+html.qtv-desktop .desk-hero-in {
+  position: relative;
+  z-index: 2;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 34px 40px;
+}
+
+html.qtv-desktop .desk-hero-in h2 {
+  margin: 6px 0 0;
+  font-size: 44px;
+  line-height: 1.02;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: #fff;
+}
+
+html.qtv-desktop:not(.dark) .desk-hero-in h2 {
+  color: #121418;
+}
+
+html.qtv-desktop .desk-hero-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: rgb(255 255 255 / 0.66);
+}
+
+html.qtv-desktop:not(.dark) .desk-hero-meta {
+  color: rgb(var(--c-muted));
+}
+
+html.qtv-desktop .desk-hero-meta b {
+  color: rgb(var(--c-accent));
+  font-weight: 700;
+}
+
+html.qtv-desktop .desk-hero-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+html.qtv-desktop .desk-hero .desk-btn {
+  border-color: rgb(255 255 255 / 0.28);
+  color: #fff;
+}
+
+html.qtv-desktop:not(.dark) .desk-hero .desk-btn {
+  border-color: rgb(22 24 29 / 0.18);
+  color: #16181d;
+}

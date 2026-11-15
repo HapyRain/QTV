@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import './desktop.css';
 import { Providers } from '@/components/providers';
+import { DesktopRuntime } from '@/components/desktop/desktop-runtime';
 
 export const metadata: Metadata = {
   title: {
@@ -62,7 +64,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        <Providers>{children}</Providers>
+        {/* 桌面壳标记挂在 Providers 内：与其余客户端 provider 同一次挂载/卸载，
+            且不在 body 下多造一层游离的 client 边界（它对 DOM 的作用与位置无关） */}
+        <Providers>
+          {children}
+          <DesktopRuntime />
+        </Providers>
       </body>
     </html>
   );

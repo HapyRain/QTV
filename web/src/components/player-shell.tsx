@@ -16,6 +16,7 @@ import { CONTROL_SHOW_CLASS, syncMiniProgressBar } from '@/lib/mini-progress-bar
 import { loadCacheSettings } from '@/lib/video-cache';
 import { cn, formatTime } from '@/lib/utils';
 import { prefersTouchPointer } from '@/lib/touch-pointer';
+import { isDesktopShell, setDesktopWindowFullscreen } from '@/lib/desktop';
 import { createTapArbiter, decideGestureAxis } from '@/lib/touch-gestures';
 import {
   findActiveSegment,
@@ -462,6 +463,25 @@ export function PlayerShell({
       restoreEvents.forEach((event) => video.removeEventListener(event, onRestoreEvent));
     };
 
+    // 本地缓存文件（/api/local-file 由各端本地服务提供）或直链 MP4：浏览器原生解码，
+    // 不能交给 hls.js（它只认 m3u8）。这也是离线缓存能真正播起来的关键分支。
+    const isDirectMedia =
+      mediaUrl.startsWith('/api/local-file') || /\.(mp4|m4v|mov)(\?|$)/i.test(mediaUrl);
+    if (isDirectMedia) {
+      hlsRef.current = null;
+      currentMediaUrlRef.current = mediaUrl;
+      const onDirectErr = () => {
+        video.removeEventListener('error', onDirectErr);
+        // 这里没有在线地址可退（props.url 就是本地缓存地址），交给用户换源/重新缓存
+        showHint('本地缓存播放失败，请换源或重新缓存');
+      };
+      video.addEventListener('error', onDirectErr);
+      video.src = mediaUrl;
+      video.load();
+      video.play().catch(() => {});
+      return;
+    }
+
     // iOS WKWebView 原生 HLS 路径：当 MSE (Hls.isSupported()) 不可用时，走系统 WebKit 硬件解码，
     // 若开启去广告则通过本地 /api/proxy?adFilter=1 剥离广告分片并重写相对路径
     if (!Hls.isSupported() && video.canPlayType("application/vnd.apple.mpegurl")) {
@@ -473,7 +493,7 @@ export function PlayerShell({
       const onNativeErr = () => {
         video.removeEventListener("error", onNativeErr);
         if (allowProxyFallback && !targetSrc.startsWith("/api/proxy")) {
-          showHint("直连受限，改用代理重试...");
+          showHint('连接不畅，换条线路重试…');
           setupHls(video, `/api/proxy?url=${encodeURIComponent(mediaUrl)}&adFilter=${propsRef.current.adFilter ? "1" : "0"}`, false);
         }
       };
@@ -528,7 +548,7 @@ export function PlayerShell({
             !mediaUrl.startsWith('/api/proxy') &&
             (decision.attempt >= 2 || data.details === 'manifestLoadError')
           ) {
-            showHint('直连失败，改用代理重试...');
+            showHint('播放失败，换条线路重试…');
             setupHls(video, `/api/proxy?url=${encodeURIComponent(mediaUrl)}`, false);
             return;
           }
@@ -591,6 +611,9 @@ export function PlayerShell({
     // 触屏没有 hover，自动隐藏会让按钮来不及点（issue #937）：改为常驻，
     // 由「点按视频 toggle」收起。CONTROL_HIDE_TIME 是 static，创建后修改立即生效。
     const touchPointer = prefersTouchPointer();
+    // 桌面壳（Electron）里 HTML 全屏 API 对无边框窗口不生效：改用 ArtPlayer 的
+    // 「网页全屏」铺满视口 + 主进程把窗口切成系统全屏（setFullscreen 桥）。
+    const desktopShell = isDesktopShell();
     Artplayer.CONTROL_HIDE_TIME = touchPointer ? TOUCH_CONTROL_HIDE_MS : DESKTOP_CONTROL_HIDE_MS;
 
     // 初始化每集状态
@@ -618,7 +641,9 @@ export function PlayerShell({
       setting: true,
       playbackRate: true,
       aspectRatio: true,
-      fullscreen: true,
+      // 桌面壳关掉元素全屏：requestFullscreen() 在这个无边框窗口里永远 pending；
+      // 移动端保持元素全屏（真横屏、沉浸式），两条路径互不影响。
+      fullscreen: !desktopShell,
       fullscreenWeb: true,
       // 恒传 true，不跟设置项走：库的 miniProgressBar 插件只在构造时注册、运行时不可换，
       // 而它正是「控制栏显示时摘掉 art-mini-progress-bar」的唯一维护者。设置项只负责
@@ -705,7 +730,11 @@ export function PlayerShell({
     art.on('video:durationchange', renderSkipMarks);
     // 全屏切换 / 播放器尺寸变化会重建控件，色带随之被清掉，这里补一次重绘
     art.on('fullscreen', renderSkipMarks);
-    art.on('fullscreenWeb', renderSkipMarks);
+    art.on('fullscreenWeb', (state: boolean) => {
+      renderSkipMarks();
+      // 网页全屏只铺满视口；桌面壳再把窗口本身切成系统全屏，才是真正的「全屏看片」
+      if (desktopShell) setDesktopWindowFullscreen(state);
+    });
     art.on('resize', renderSkipMarks);
 
     // —— 触屏全屏 = 传统横屏全屏 ——
@@ -955,7 +984,17 @@ export function PlayerShell({
           current.toggle(); showHint('播放/暂停'); e.preventDefault();
           break;
         case 'f': case 'F':
-          current.fullscreen = !current.fullscreen; e.preventDefault();
+          if (desktopShell) current.fullscreenWeb = !current.fullscreenWeb;
+          else current.fullscreen = !current.fullscreen;
+          e.preventDefault();
+          break;
+        case 'Escape':
+          // 网页全屏没有浏览器原生 Esc 退出，这里补上（桌面壳同时退出窗口全屏）
+          if (current.fullscreenWeb) {
+            current.fullscreenWeb = false;
+            if (desktopShell) setDesktopWindowFullscreen(false);
+            e.preventDefault();
+          }
           break;
         // 标记类快捷键一律要求 Shift：这几键会直接写盘并影响整部剧，
         // 单键太容易误触（误记片头 = 之后每集都被跳过一大段）

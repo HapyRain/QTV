@@ -25,6 +25,7 @@ import type { SourceConfig } from '@/lib/types';
 import { useToast } from './toast';
 import { formatRelativeTime, hostnameOf, validateSourceUrl, cn } from '@/lib/utils';
 import { exportConfig, importConfig } from '@/lib/db';
+import { nativeSaveTarget } from '@/lib/download-saver';
 import { PERSIST_KEY } from '@/lib/persist-storage';
 import { api } from '@/lib/client-api';
 import { AUTO_REFRESH_MAX_FAIL_STREAK, syncSourceSubscription } from '@/lib/subscription-sync';
@@ -54,7 +55,7 @@ const SECONDARY_TABS: Record<PrimaryTab, { id: SecondaryTab; label: string }[]> 
 
 const TAB_STORAGE_KEY = 'libretv-settings-tab';
 
-export function SourceManagerDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SourceManagerDrawer({ open, onClose, inline = false }: { open: boolean; onClose: () => void; inline?: boolean }) {
   const [primary, setPrimary] = useState<PrimaryTab>('sources');
   const [secondary, setSecondary] = useState<Record<PrimaryTab, SecondaryTab>>({
     sources: 'vod',
@@ -104,6 +105,8 @@ export function SourceManagerDrawer({ open, onClose }: { open: boolean; onClose:
       title="片源与偏好设置"
       resetScrollKey={current}
       mobileFull
+      inline={inline}
+      header={!inline}
       subheader={
         <div className="space-y-2">
           <TabRow tabs={PRIMARY_TABS} value={primary} onChange={setPrimary} variant="primary" ariaLabel="设置分类" />
@@ -188,7 +191,7 @@ const VOD_FILTERS: { id: VodFilter; label: string }[] = [
   { id: 'manual', label: '手动添加' },
 ];
 
-function VodSourcesPanel() {
+export function VodSourcesPanel() {
   const store = useAppStore();
   const { toast } = useToast();
   const [editing, setEditing] = useState<string | null>(null);
@@ -234,7 +237,7 @@ function VodSourcesPanel() {
     }
     const result = await probe(filtered.map((s) => ({ key: s.key, url: s.url })));
     if (!result) return;
-    toast(`测活完成：${result.ok}/${result.total} 个可用`, result.ok === result.total ? 'success' : 'info');
+    toast(`检测完成：${result.ok}/${result.total} 个可用`, result.ok === result.total ? 'success' : 'info');
   };
 
   const restoreAll = () => {
@@ -272,7 +275,7 @@ function VodSourcesPanel() {
         <EmptyState
           icon="link"
           title="还没有添加任何点播源"
-          description="添加采集站 API 即可搜索影片；也可到「聚合订阅」一键导入整套点播源与直播源。"
+          description="填入片源接口地址即可搜索影片；也可以在「聚合订阅」一键导入整套片源。"
           action={
             <button className="btn-primary btn-sm" onClick={() => setEditing('__new__')}>
               添加第一个点播源
@@ -304,7 +307,7 @@ function VodSourcesPanel() {
                 {allSelected ? '全部停用' : '全部启用'}
               </button>
               <button className="btn-ghost btn-sm" onClick={runAll} disabled={filtered.length === 0}>
-                {isProbing ? '取消测活' : '批量测活'}
+                {isProbing ? '停止检测' : '一键检测'}
               </button>
               {filter === 'disabled' && (
                 <button className="btn-ghost btn-sm" onClick={restoreAll} disabled={filtered.length === 0}>
@@ -502,7 +505,7 @@ function VodSourceRow({
   );
 }
 
-function PlaybackPanel() {
+export function PlaybackPanel() {
   const store = useAppStore();
   const { toast } = useToast();
   const [clearMarksOpen, setClearMarksOpen] = useState(false);
@@ -513,7 +516,7 @@ function PlaybackPanel() {
       <div className="space-y-3">
         <ToggleRow
           label="广告切片过滤"
-          description="智能剔除播放列表中的插播广告分片，保持正片时间轴连续。"
+          description="自动跳过正片里的插播广告，观看更连贯。"
           checked={store.adFilter}
           onChange={(v) => store.updateSettings({ adFilter: v })}
         />
@@ -531,7 +534,7 @@ function PlaybackPanel() {
         />
         <ToggleRow
           label="人声与音量增强"
-          description="部分片源声音偏小时开启：通过音频增益链放大约 1.8 倍并启用防破音限幅。"
+          description="片源声音偏小时开启，声音放大约 1.8 倍且不破音。"
           checked={store.volumeBoost}
           onChange={(v) => store.updateSettings({ volumeBoost: v })}
         />
@@ -602,8 +605,8 @@ function VideoCachePanel() {
   return (
     <div className="space-y-3 pt-3 mt-3 border-t border-line">
       <ToggleRow
-        label="播放分片本机预缓存"
-        description="观影或暂停时自动将后续视频分片缓存至本机闪存，回看或网络波动时秒级命中。"
+        label="提前缓存，播放更顺"
+        description="边看边缓存后续内容，回看或网络不稳定时更流畅。"
         checked={enabled}
         onChange={(v) => {
           const next = saveCacheSettings({ enabled: v });
@@ -632,11 +635,11 @@ function VideoCachePanel() {
   );
 }
 
-function ImagePanel() {
+export function ImagePanel() {
   const store = useAppStore();
   const mode = store.imageProxyMode;
   const description: Record<'direct' | 'proxy' | 'custom', string> = {
-    direct: '优先从源站直接加载高清海报；遇到防盗链时自动切换公共镜像与本地代理兜底。',
+    direct: '优先加载高清海报；加载失败时自动换线路重试。',
     proxy: '所有剧集海报优先通过本机代理通道伪装来源加载，兼容性最稳。',
     custom: '使用自定义图片代理模板加载剧集封面。',
   };
@@ -650,7 +653,7 @@ function ImagePanel() {
           description={description[mode]}
           onChange={(v) => store.updateSettings({ imageProxyMode: v as 'direct' | 'proxy' | 'custom' })}
           options={[
-            { value: 'direct', label: '智能直连', hint: '速度最快' },
+            { value: 'direct', label: '智能加速', hint: '速度最快' },
             { value: 'proxy', label: '代理增强', hint: '防破图最稳' },
             { value: 'custom', label: '自定义', hint: '自建镜像模板' },
           ]}
@@ -694,7 +697,7 @@ const REFRESH_OPTIONS: DropdownOption[] = [
   { value: '30', label: '每 30 天' },
 ];
 
-function SourceSubscriptions() {
+export function SourceSubscriptions() {
   const store = useAppStore();
   const { toast } = useToast();
   const [subUrl, setSubUrl] = useState('');
@@ -710,7 +713,7 @@ function SourceSubscriptions() {
         stats?.format === 'tvbox'
           ? '（TVBOX 配置）'
           : stats?.format === 'source-catalog'
-            ? '（接口源列表）'
+            ? '（聚合列表）'
             : '';
       toast(`已同步 ${vodCount} 个点播源、${liveCount} 个直播源${formatLabel}${detail ? `；${detail}` : ''}`, 'success');
       setSubUrl('');
@@ -795,7 +798,7 @@ function SourceSubscriptions() {
       <div className="flex gap-2 mb-2.5">
         <input
           className="input flex-1 min-w-0"
-          placeholder="输入订阅地址（QTV 源列表或 TVBOX JSON 链接）"
+          placeholder="输入订阅地址（QTV 片源列表或 TVBox 订阅链接）"
           value={subUrl}
           onChange={(e) => setSubUrl(e.target.value)}
           onKeyDown={(e) => {
@@ -947,13 +950,23 @@ function SourceSubscriptions() {
   );
 }
 
-function ConfigIoPanel() {
+export function ConfigIoPanel() {
   const { toast } = useToast();
   const [pending, setPending] = useState<{ file: File; summary: string } | null>(null);
 
   const doExport = async () => {
     try {
       const json = await exportConfig();
+      // Android WebView 的 blob 下载会静默失败：有原生桥时直接写到系统「下载」目录
+      if (typeof window !== 'undefined' && (window as { QTV?: unknown }).QTV) {
+        const filename = `QTV-Backup_${Date.now()}.json`;
+        const target = nativeSaveTarget(filename);
+        await target.write(new TextEncoder().encode(json));
+        await target.close();
+        const path = target.getSavedPath?.();
+        toast(path ? `备份已保存到 ${path}` : '备份已保存到系统「下载」目录', 'success');
+        return;
+      }
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -961,7 +974,7 @@ function ConfigIoPanel() {
       a.download = `QTV-Backup_${Date.now()}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      toast('整机配置备份已导出', 'success');
+      toast('备份已导出到浏览器默认下载目录', 'success');
     } catch {
       toast('导出失败', 'error');
     }
@@ -1030,7 +1043,7 @@ function summarizeConfig(text: string): string {
   try {
     cfg = JSON.parse(text) as { name?: string; data?: Record<string, unknown> };
   } catch {
-    throw new Error('文件不是合法的 JSON');
+    throw new Error('备份文件打不开，请确认是从 QTV 导出的');
   }
   // 兼容旧版导出的 LibreTV-Settings 备份
   if (cfg.name !== 'QTV-Settings' && cfg.name !== 'LibreTV-Settings') throw new Error('不是有效的 QTV 备份文件');

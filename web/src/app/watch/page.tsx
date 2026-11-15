@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { api } from '@/lib/client-api';
 const PlayerShell = dynamic(() => import('@/components/player-shell').then((m) => m.PlayerShell), {
   ssr: false,
@@ -15,6 +16,7 @@ const PlayerShell = dynamic(() => import('@/components/player-shell').then((m) =
   ),
 });
 import { EmptyState, LoadingState, Spinner } from '@/components/states';
+import { DesktopWatch, type DesktopPlayerProps } from '@/components/desktop/watch/desktop-watch';
 import { SwitchSourceModal } from '@/components/switch-source';
 import { SkipMarkPanel } from '@/components/skip-mark-panel';
 import { skipMarkKey, validateSegment, type SkipSegment } from '@/lib/skip-marks';
@@ -22,9 +24,11 @@ import type { PlayerSkipApi } from '@/components/player-shell';
 import { useToast } from '@/components/toast';
 import { enqueueDownload, requestShowDownloadManager } from '@/components/download-manager';
 import { Icon } from '@/components/icon';
+import { Header } from '@/components/header';
 import { useAuth } from '@/components/auth';
 import { resolveSource, useAppStore } from '@/lib/store';
 import { qualityKey, qualityLabel } from '@/lib/quality';
+import { useDesktopMode } from '@/lib/desktop';
 import {
   clearProgress,
   progressKeyOf,
@@ -50,6 +54,8 @@ export default function WatchPage() {
 function WatchContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const desktopMode = useDesktopMode();
+  const desktop = desktopMode === 'desktop';
   const store = useAppStore();
   const { verified } = useAuth();
   const { toast } = useToast();
@@ -201,6 +207,19 @@ function WatchContent() {
     [markKey, toast]
   );
 
+  // 打点面板需要的实时播放时钟：桌面与移动两个分支共用同一实现
+  const getPlayerClock = useCallback(() => {
+    const api = playerApiRef.current;
+    if (!api) return null;
+    return {
+      currentTime: api.getCurrentTime(),
+      duration: api.getDuration(),
+      seek: (s: number) => api.seek(s),
+      pause: () => api.pause(),
+      isPaused: () => api.isPaused(),
+    };
+  }, []);
+
   // 分段计算（超过 40 集时启用 50 集分段胶囊）
   const useChunking = episodes.length > 40;
   const totalChunks = Math.ceil(episodes.length / EPISODE_CHUNK_SIZE);
@@ -221,19 +240,126 @@ function WatchContent() {
     return reversed ? [...sliced].reverse() : sliced;
   }, [episodes, useChunking, chunkIndex, reversed]);
 
+  const episodeKey = `${sourceKey}:${vodId}:${currentIndex}`;
+
+  /**
+   * 离线缓存命中：下载完成后会把保存位置写进 downloads 表，
+   * 这里按「源 + 影片 + 集」找它。命中时播放本机文件，不再走在线地址——
+   * 这正是「缓存完了回来看还在走在线线路」的根因。
+   */
+  const cachedDownload = useLiveQuery(async () => {
+    if (!sourceKey || !vodId) return undefined;
+    const all = await db.downloads.toArray();
+    return all.find(
+      (t) => t.status === 'completed' && !!t.filePath && t.episodeKey === episodeKey
+    );
+  }, [episodeKey]);
+
+  const localPlaybackUrl = cachedDownload?.filePath
+    ? `/api/local-file?path=${encodeURIComponent(cachedDownload.filePath)}`
+    : null;
+
+  // 播放器 props 只在这里构造一次：桌面与移动两个分支渲染同一个播放器配置，换源/换集行为一致
+  const playerProps: DesktopPlayerProps = {
+    url: localPlaybackUrl ?? currentUrl,
+    title: videoTitle,
+    adFilter: store.adFilter,
+    autoplayNext: store.autoplayNext,
+    skipMark,
+    autoSkipSegments: store.autoSkipSegments,
+    volumeBoost: store.volumeBoost,
+    miniProgressBar: store.miniProgressBar,
+    pendingStart,
+    onPendingStart: setPendingStart,
+    onPlayerApi: (playerApi) => {
+      playerApiRef.current = playerApi;
+    },
+    onRecordSegment: handleRecordSegment,
+    episodeKey: `${sourceKey}:${vodId}:${currentIndex}`,
+    nextUrl: currentIndex + 1 < episodes.length ? episodes[currentIndex + 1] : undefined,
+    nextEpisodeKey:
+      currentIndex + 1 < episodes.length ? `${sourceKey}:${vodId}:${currentIndex + 1}` : undefined,
+    getRestorePosition,
+    onTimeUpdate: handleProgress,
+    onPause: handleProgress,
+    onEnded: handleEnded,
+    hasPrevEpisode: currentIndex > 0,
+    hasNextEpisode: episodes.length > 0 && currentIndex < episodes.length - 1,
+    onPrevEpisode: () => goEpisode(currentIndex - 1),
+    onNextEpisode: () => goEpisode(currentIndex + 1),
+    onQuality: (height: number) => {
+      if (!sourceKey || !vodId) return;
+      useAppStore.getState().setQuality({
+        [qualityKey(sourceKey, vodId)]: { height, from: 'play', timestamp: Date.now() },
+      });
+    },
+  };
+
+  // 环境判定完成前先占位：避免桌面壳首帧按移动端布局挂载一次播放器、随后再重挂（重复拉流）
+  if (desktopMode === 'pending') {
+    return <div className="min-h-[100dvh] bg-page" />;
+  }
+
   if (!source) {
-    return (
-      <div className="min-h-screen-safe flex items-center justify-center px-4">
-        <div className="text-center max-w-md card p-6">
-          <h1 className="text-content font-semibold mb-2">未找到对应的点播源</h1>
-          <p className="text-sm text-muted mb-4">
-            该影片来自点播源「{sourceKey}」，可能已被移除或尚未导入。
-          </p>
-          <Link href="/" className="btn-primary">
-            返回探索首页
-          </Link>
-        </div>
+    const notice = (
+      <div className="text-center max-w-md card p-6">
+        <h1 className="text-content font-semibold mb-2">未找到对应的点播源</h1>
+        <p className="text-sm text-muted mb-4">
+          该影片来自点播源「{sourceKey}」，可能已被移除或尚未导入。
+        </p>
+        <Link href="/" className="btn-primary">
+          返回探索首页
+        </Link>
       </div>
+    );
+    // 桌面壳是无边框窗口，标题栏由 Header 提供；这一页没有播放器也要把外壳渲染出来，
+    // 否则用户既关不掉窗口也拖不动它。
+    if (desktop) {
+      return (
+        <>
+          <div className="desktop-main bg-page">
+            <div className="h-full flex items-center justify-center px-4">{notice}</div>
+          </div>
+          <Header />
+        </>
+      );
+    }
+    return <div className="min-h-screen-safe flex items-center justify-center px-4">{notice}</div>;
+  }
+
+  if (desktop) {
+    return (
+      <DesktopWatch
+        player={playerProps}
+        sourceKey={sourceKey}
+        vodId={vodId}
+        title={videoTitle}
+        sourceName={source.name}
+        qualityLabel={currentQualityLabel ?? null}
+        info={info}
+        currentIndex={currentIndex}
+        cachedLocal={Boolean(localPlaybackUrl)}
+        episodeCount={episodes.length}
+        tab={activeTab}
+        onTabChange={setActiveTab}
+        reversed={reversed}
+        onToggleReversed={() => setReversed((v) => !v)}
+        chunked={useChunking}
+        chunks={chunks}
+        chunkIndex={chunkIndex}
+        onChunkChange={setChunkIndex}
+        visibleEpisodes={visibleEpisodes}
+        onSelectEpisode={goEpisode}
+        onPrevEpisode={() => goEpisode(currentIndex - 1)}
+        onNextEpisode={() => goEpisode(currentIndex + 1)}
+        markedCount={markedCount}
+        markKey={markKey}
+        pendingStart={pendingStart}
+        onPendingStart={setPendingStart}
+        getPlayerClock={getPlayerClock}
+        detailLoading={detailQuery.isLoading}
+        detailError={detailQuery.isError}
+      />
     );
   }
 
@@ -249,6 +375,11 @@ function WatchContent() {
               {currentQualityLabel && (
                 <span className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-accent/15 text-accent tabular-nums">
                   {currentQualityLabel}
+                </span>
+              )}
+              {localPlaybackUrl && (
+                <span className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-success/15 text-success">
+                  已缓存
                 </span>
               )}
             </div>
@@ -270,17 +401,25 @@ function WatchContent() {
               type="button"
               className="btn-ghost btn-sm !px-2.5 !py-1.5 text-xs"
               onClick={() => {
+                if (localPlaybackUrl) {
+                  requestShowDownloadManager();
+                  return;
+                }
                 if (!currentUrl) return;
                 enqueueDownload({
                   url: currentUrl,
                   title: `${videoTitle}${episodes.length > 1 ? ` 第${currentIndex + 1}集` : ''}`,
                   format: 'MP4',
+                  episodeKey,
+                  sourceKey,
+                  vodId,
+                  episodeIndex: currentIndex,
                 });
               }}
-              aria-label="缓存本集"
+              aria-label={localPlaybackUrl ? '已缓存，打开缓存中心' : '缓存本集'}
             >
               <Icon name="download" className="w-3.5 h-3.5" />
-              <span className="hidden xs:inline">缓存</span>
+              <span className="hidden xs:inline">{localPlaybackUrl ? '已缓存' : '缓存'}</span>
             </button>
             <HomeButton />
           </div>
@@ -289,42 +428,8 @@ function WatchContent() {
         {/* 16:9 播放器容器 */}
         <div className="max-w-5xl mx-auto w-full bg-black">
           <div className="aspect-video w-full bg-black overflow-hidden relative">
-            {currentUrl ? (
-              <PlayerShell
-                url={currentUrl}
-                title={videoTitle}
-                adFilter={store.adFilter}
-                autoplayNext={store.autoplayNext}
-                skipMark={skipMark}
-                autoSkipSegments={store.autoSkipSegments}
-                volumeBoost={store.volumeBoost}
-                miniProgressBar={store.miniProgressBar}
-                pendingStart={pendingStart}
-                onPendingStart={setPendingStart}
-                onPlayerApi={(api) => {
-                  playerApiRef.current = api;
-                }}
-                onRecordSegment={handleRecordSegment}
-                episodeKey={`${sourceKey}:${vodId}:${currentIndex}`}
-                nextUrl={currentIndex + 1 < episodes.length ? episodes[currentIndex + 1] : undefined}
-                nextEpisodeKey={
-                  currentIndex + 1 < episodes.length ? `${sourceKey}:${vodId}:${currentIndex + 1}` : undefined
-                }
-                getRestorePosition={getRestorePosition}
-                onTimeUpdate={handleProgress}
-                onPause={handleProgress}
-                onEnded={handleEnded}
-                hasPrevEpisode={currentIndex > 0}
-                hasNextEpisode={episodes.length > 0 && currentIndex < episodes.length - 1}
-                onPrevEpisode={() => goEpisode(currentIndex - 1)}
-                onNextEpisode={() => goEpisode(currentIndex + 1)}
-                onQuality={(height) => {
-                  if (!sourceKey || !vodId) return;
-                  useAppStore.getState().setQuality({
-                    [qualityKey(sourceKey, vodId)]: { height, from: 'play', timestamp: Date.now() },
-                  });
-                }}
-              />
+            {localPlaybackUrl || currentUrl ? (
+              <PlayerShell {...playerProps} />
             ) : (
               <div className="w-full h-full flex items-center justify-center">
                 {detailQuery.isLoading ? (
@@ -496,17 +601,7 @@ function WatchContent() {
               markKey={markKey}
               pendingStart={pendingStart}
               onPendingStart={setPendingStart}
-              getPlayerClock={() => {
-                const api = playerApiRef.current;
-                if (!api) return null;
-                return {
-                  currentTime: api.getCurrentTime(),
-                  duration: api.getDuration(),
-                  seek: (s) => api.seek(s),
-                  pause: () => api.pause(),
-                  isPaused: () => api.isPaused(),
-                };
-              }}
+              getPlayerClock={getPlayerClock}
             />
           </section>
         )}

@@ -3,30 +3,30 @@
 @tailwind utilities;
 
 /*
- * Apple TV+ / Infuse 映画流光风设计系统（Mobile-First Tokens）
- * - 深色主题（默认）：OLED 纯黑深邃影院底 (#06080c) + 分层微光表面 (#0d1118 / #131923) + 1px 微高光描边；
- * - 浅色主题：纯净雾白画布 (#f5f7fa) + 纯白悬浮卡片。
+ * QTV 设计系统（与桌面 10/11 同一套 token）
+ * - 深色：纯黑画布 + 白主按钮 + 蓝强调色；
+ * - 浅色：暖白纸感 (#f4f2ed) + 白色卡片 + 蓝主按钮。
  */
 :root {
-  --c-page: 245 247 250;           /* #f5f7fa 浅色画布 */
+  --c-page: 244 242 237;           /* #f4f2ed 暖白纸 */
   --c-surface: 255 255 255;        /* #ffffff 主面板 */
   --c-surface-raised: 255 255 255; /* #ffffff 浮层/BottomSheet */
   --c-card: 255 255 255;           /* #ffffff 卡片 */
-  --c-chip: 238 242 246;           /* #eef2f6 胶囊/控件底 */
-  --c-hover: 229 235 242;          /* #e5ebf2 按压/激活态 */
-  --c-line: 222 228 236;           /* #dee4ec 极细分隔线 */
-  --c-content: 15 23 42;           /* #0f172a 主文本 */
-  --c-muted: 71 85 105;            /* #475569 次级文本 */
-  --c-faint: 112 126 144;          /* #707e90 三级辅助文本 */
-  --c-accent: 14 138 198;          /* #0e8ac6 映画蓝 */
-  --c-accent-hover: 10 116 170;    /* #0a74aa */
+  --c-chip: 236 233 226;           /* #ece9e2 胶囊/控件底 */
+  --c-hover: 231 227 219;          /* #e7e3db 按压/激活态 */
+  --c-line: 224 219 210;           /* #e0dbd2 极细分隔线 */
+  --c-content: 22 24 29;           /* #16181d 主文本 */
+  --c-muted: 92 98 112;            /* #5c6270 次级文本 */
+  --c-faint: 141 146 156;          /* #8d929c 三级辅助文本 */
+  --c-accent: 10 132 255;          /* #0a84ff */
+  --c-accent-hover: 6 110 220;     /* #066edc */
   --c-on-accent: 255 255 255;
-  --c-danger: 220 38 38;
-  --c-danger-hover: 185 28 28;
-  --c-success: 16 158 96;
-  --c-warning: 217 119 6;
-  --c-info: 14 138 198;
-  --c-rating: 234 158 12;
+  --c-danger: 215 45 45;
+  --c-danger-hover: 180 32 32;
+  --c-success: 47 158 107;
+  --c-warning: 200 138 20;
+  --c-info: 10 132 255;
+  --c-rating: 185 138 60;
   --c-danger-solid: 185 28 28;
   --c-success-solid: 15 130 78;
   --c-warning-solid: 180 95 6;
@@ -34,8 +34,8 @@
   --r-card: 18px;
   --r-field: 14px;
   --r-ctl: 999px;
-  --shadow-1: 0 2px 8px rgb(15 23 42 / 0.04), 0 12px 32px rgb(15 23 42 / 0.06);
-  --shadow-2: 0 4px 14px rgb(15 23 42 / 0.08), 0 22px 48px rgb(15 23 42 / 0.12);
+  --shadow-1: 0 2px 8px rgb(30 35 45 / 0.05), 0 12px 32px rgb(30 35 45 / 0.07);
+  --shadow-2: 0 4px 14px rgb(30 35 45 / 0.08), 0 22px 48px rgb(30 35 45 / 0.12);
   --glow-accent: 0 8px 26px rgb(var(--c-accent) / 0.28);
   --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --dur-1: 180ms;
@@ -44,33 +44,33 @@
 }
 
 .dark {
-  /* OLED 纯黑深邃影院底 + 微高光表面分层 */
-  --c-page: 6 8 12;                /* #06080c 影院纯黑底 */
-  --c-surface: 12 16 23;           /* #0c1017 一级容器 */
-  --c-surface-raised: 17 23 33;    /* #111721 浮层/BottomSheet */
-  --c-card: 14 19 28;              /* #0e131c 卡片表面 */
-  --c-chip: 23 31 44;              /* #171f2c 填充胶囊底 */
-  --c-hover: 31 42 58;             /* #1f2a3a 触摸高亮 */
-  --c-line: 34 45 62;              /* #222d3e 1px 微高光描边 */
-  --c-content: 241 245 249;        /* #f1f5f9 纯净亮白字 */
-  --c-muted: 148 163 184;          /* #94a3b8 次级银灰 */
-  --c-faint: 100 116 139;          /* #64748b 三级暗银 */
-  --c-accent: 56 189 248;          /* #38bdf8 流光青蓝 */
-  --c-accent-hover: 125 211 252;   /* #7dd3fc */
-  --c-on-accent: 6 18 28;          /* #06121c */
-  --c-danger: 251 113 133;
-  --c-danger-hover: 253 164 175;
-  --c-success: 52 211 153;
-  --c-warning: 251 191 36;
-  --c-info: 56 189 248;
-  --c-rating: 251 191 36;
+  /* 纯黑影院底 + 中性表面；强调色统一为蓝 */
+  --c-page: 0 0 0;                 /* #000000 */
+  --c-surface: 16 16 18;           /* #101012 */
+  --c-surface-raised: 21 21 24;    /* #151518 */
+  --c-card: 18 18 20;              /* #121214 */
+  --c-chip: 30 30 34;              /* #1e1e22 */
+  --c-hover: 40 40 45;             /* #28282d */
+  --c-line: 45 45 50;              /* #2d2d32 */
+  --c-content: 244 247 251;        /* #f4f7fb */
+  --c-muted: 154 163 173;          /* #9aa3ad */
+  --c-faint: 108 113 122;          /* #6c717a */
+  --c-accent: 95 184 255;          /* #5fb8ff */
+  --c-accent-hover: 140 210 255;   /* #8cd2ff */
+  --c-on-accent: 4 18 31;          /* #04121f */
+  --c-danger: 255 90 90;
+  --c-danger-hover: 255 130 130;
+  --c-success: 52 199 140;
+  --c-warning: 230 170 70;
+  --c-info: 95 184 255;
+  --c-rating: 232 195 126;
   --c-danger-solid: 190 18 60;
   --c-success-solid: 5 150 105;
   --c-warning-solid: 180 83 9;
   --c-info-solid: 2 132 199;
-  --shadow-1: 0 2px 6px rgb(0 0 0 / 0.4), 0 14px 36px rgb(0 0 0 / 0.52), inset 0 1px 0 rgb(255 255 255 / 0.04);
-  --shadow-2: 0 6px 18px rgb(0 0 0 / 0.5), 0 26px 64px rgb(0 0 0 / 0.68), inset 0 1px 0 rgb(255 255 255 / 0.07);
-  --glow-accent: 0 8px 28px rgb(56 189 248 / 0.32);
+  --shadow-1: 0 2px 6px rgb(0 0 0 / 0.45), 0 14px 36px rgb(0 0 0 / 0.55);
+  --shadow-2: 0 6px 18px rgb(0 0 0 / 0.55), 0 26px 64px rgb(0 0 0 / 0.7);
+  --glow-accent: 0 8px 28px rgb(95 184 255 / 0.32);
   color-scheme: dark;
 }
 
@@ -91,8 +91,7 @@ textarea,
 }
 
 .dark body {
-  background: radial-gradient(120% 60% at 50% 0%, rgb(17 26 42 / 0.65) 0%, rgb(6 8 12) 58%) fixed;
-  background-color: rgb(6 8 12);
+  background: #000;
 }
 
 body {
@@ -503,3 +502,123 @@ body::-webkit-scrollbar {
 .art-video-player .art-notice {
   border-radius: var(--r-ctl);
 }
+
+
+/* === QTV Windows Native Desktop Design System ===
+ * 全部挂在 html.qtv-desktop 下（由 lib/desktop.ts 在桌面壳挂载后添加），
+ * 同一套源码在 Android/iOS 上不命中任何一条，移动端排版零影响。 */
+html.qtv-desktop {
+  --titlebar-h: 48px;
+  --sidebar-w: 216px;
+}
+
+html.qtv-desktop .desktop-titlebar {
+  height: var(--titlebar-h);
+  background: rgb(var(--c-surface) / 0.86);
+  backdrop-filter: blur(28px) saturate(1.8);
+  -webkit-backdrop-filter: blur(28px) saturate(1.8);
+  -webkit-app-region: drag;
+}
+
+html.qtv-desktop .desktop-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+html.qtv-desktop .desktop-sidebar {
+  width: var(--sidebar-w);
+  top: var(--titlebar-h);
+  background: rgb(var(--c-surface) / 0.76);
+  backdrop-filter: blur(28px) saturate(1.8);
+  -webkit-backdrop-filter: blur(28px) saturate(1.8);
+}
+
+html.qtv-desktop .desktop-main {
+  padding-top: var(--titlebar-h);
+  padding-left: var(--sidebar-w);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+html.qtv-desktop .desktop-scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--c-line)) transparent;
+}
+html.qtv-desktop .desktop-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+html.qtv-desktop .desktop-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+html.qtv-desktop .desktop-scroll::-webkit-scrollbar-thumb {
+  background: rgb(var(--c-line) / 0.8);
+  border-radius: 999px;
+}
+html.qtv-desktop .desktop-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--c-muted) / 0.7);
+}
+
+html.qtv-desktop .acrylic-modal {
+  background: rgb(var(--c-surface-raised) / 0.94);
+  backdrop-filter: blur(36px) saturate(1.9);
+  -webkit-backdrop-filter: blur(36px) saturate(1.9);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+html.qtv-desktop .kbd-cap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: rgb(var(--c-muted));
+  background: rgb(var(--c-chip));
+  border: 1px solid rgb(var(--c-line));
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  line-height: 1;
+}
+
+html.qtv-desktop .win-caption-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 30px;
+  border-radius: 6px;
+  color: rgb(var(--c-muted));
+  transition: background-color 140ms ease, color 140ms ease;
+}
+html.qtv-desktop .win-caption-btn:hover {
+  background: rgb(var(--c-hover));
+  color: rgb(var(--c-content));
+}
+html.qtv-desktop .win-caption-close:hover {
+  background: #e81123 !important;
+  color: #ffffff !important;
+}
+
+html.qtv-desktop .poster-grid-desktop {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 18px;
+}
+
+html.qtv-desktop .history-grid-desktop {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+/* 桌面固定列数：只在桌面壳里压过 Tailwind 的响应式列数，移动端仍走原有栅格 */
+html.qtv-desktop .grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+html.qtv-desktop .grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+html.qtv-desktop .grid-cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+html.qtv-desktop .grid-cols-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }

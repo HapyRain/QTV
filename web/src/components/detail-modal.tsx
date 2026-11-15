@@ -14,6 +14,8 @@ import { copyToClipboard } from '@/lib/clipboard';
 import { EmptyState, ErrorState, LoadingState } from './states';
 import { useFocusTrap } from './use-focus-trap';
 import { Icon } from './icon';
+import { useDesktopShell } from '@/lib/desktop';
+import { probePlaybackSpeed, verdictLabel, type PlaybackSpeedResult } from '@/lib/playback-speed';
 
 /**
  * 移动端原生感影视详情 Bottom Sheet（Apple TV+ / Infuse 风格）：
@@ -28,6 +30,8 @@ const DRAG_CLOSE_PX = 64;
 export function DetailModal({ item, onClose }: { item: SearchResultItem | null; onClose: () => void }) {
   const store = useAppStore();
   const router = useRouter();
+  // 桌面端是窗口应用：详情用居中弹窗，不再从底部抽屉滑出（也没有可拖拽的物理语义）
+  const desktop = useDesktopShell();
   const { toast } = useToast();
   const [detail, setDetail] = useState<VideoDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -36,6 +40,8 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
   const [posterFailed, setPosterFailed] = useState(false);
   const [chunkIndex, setChunkIndex] = useState(0);
   const [descExpanded, setDescExpanded] = useState(false);
+  const [speed, setSpeed] = useState<PlaybackSpeedResult | null>(null);
+  const [speedProbing, setSpeedProbing] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -130,6 +136,28 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
     }, 200);
   };
 
+  // 详情到手后，用真实首集跑一次「加载速度」：只读 256KB，不把整集拉下来
+  useEffect(() => {
+    const firstEpisode = detail?.episodes?.[0];
+    if (!firstEpisode) {
+      setSpeed(null);
+      setSpeedProbing(false);
+      return;
+    }
+    const controller = new AbortController();
+    setSpeed(null);
+    setSpeedProbing(true);
+    probePlaybackSpeed(firstEpisode, { signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setSpeed(result);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSpeedProbing(false);
+      });
+    return () => controller.abort();
+  }, [detail]);
+
   const totalEpisodes = detail?.episodes.length ?? 0;
 
   // 剧集分段计算（超过 50 集时启用分段胶囊）
@@ -189,7 +217,10 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
 
   return (
     <div
-      className="fixed inset-0 z-[75] flex items-end justify-center bg-black/75 backdrop-blur-[2px] animate-fade-in"
+      className={cn(
+        'fixed inset-0 z-[75] flex justify-center bg-black/75 backdrop-blur-[2px] animate-fade-in',
+        desktop ? 'items-center p-6' : 'items-end'
+      )}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -197,7 +228,12 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
       <div
         ref={panelRef}
         tabIndex={-1}
-        className="relative bg-surface-raised rounded-t-[26px] w-full max-w-2xl shadow-[0_-14px_54px_rgba(0,0,0,0.75)] border-t border-white/10 sheet-up outline-none max-h-[88dvh] flex flex-col overflow-hidden safe-x pb-[env(safe-area-inset-bottom)]"
+        className={cn(
+          'relative bg-surface-raised w-full max-w-2xl outline-none flex flex-col overflow-hidden safe-x',
+          desktop
+            ? 'rounded-2xl border border-line/70 shadow-2xl max-h-[86dvh] animate-slide-up'
+            : 'rounded-t-[26px] shadow-[0_-14px_54px_rgba(0,0,0,0.75)] border-t border-white/10 sheet-up max-h-[88dvh] pb-[env(safe-area-inset-bottom)]'
+        )}
         role="dialog"
         aria-modal="true"
         aria-label={`${item.name} 详情`}
@@ -219,16 +255,18 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
           </div>
         )}
 
-        {/* 顶部拖拽把手 */}
-        <div
-          className="relative z-10 flex shrink-0 flex-col items-center pt-2.5 pb-1 touch-none select-none cursor-grab active:cursor-grabbing"
-          onPointerDown={beginDrag}
-          onPointerMove={moveDrag}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
-        >
-          <span className="h-1.5 w-11 rounded-full bg-white/20" />
-        </div>
+        {/* 顶部拖拽把手：只有移动端底部抽屉才有下拉关闭语义 */}
+        {!desktop && (
+          <div
+            className="relative z-10 flex shrink-0 flex-col items-center pt-2.5 pb-1 touch-none select-none cursor-grab active:cursor-grabbing"
+            onPointerDown={beginDrag}
+            onPointerMove={moveDrag}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+          >
+            <span className="h-1.5 w-11 rounded-full bg-white/20" />
+          </div>
+        )}
 
         {/* 头部海报与元信息区 */}
         <div className="relative z-10 px-4 pt-2 pb-3.5 border-b border-line/60 shrink-0">
@@ -269,6 +307,36 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
                   </span>
                 ))}
               </div>
+
+              {detail && (
+                <div className="mt-2 flex items-center gap-2 text-[11px]">
+                  {speedProbing ? (
+                    <span className="inline-flex items-center gap-1.5 text-faint">
+                      <span className="w-1.5 h-1.5 rounded-full bg-faint animate-pulse" />
+                      正在实测加载速度…
+                    </span>
+                  ) : speed ? (
+                    <span
+                      className={cn(
+                        'inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border',
+                        speed.verdict === 'smooth' && 'bg-success/10 border-success/30 text-success',
+                        speed.verdict === 'ok' && 'bg-warning/10 border-warning/30 text-warning',
+                        speed.verdict === 'slow' && 'bg-danger/10 border-danger/30 text-danger',
+                        speed.verdict === 'unknown' && 'bg-chip/60 border-line/60 text-faint'
+                      )}
+                      title={
+                        speed.kbps
+                          ? `采样 ${speed.ms}ms / ${speed.kbps} kbps${speed.requiredKbps ? `，该档位建议 ${speed.requiredKbps} kbps` : ''}`
+                          : speed.error
+                      }
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                      {speed.kbps ? `${(speed.kbps / 1000).toFixed(1)} Mbps` : '未测到速率'} · {verdictLabel(speed.verdict)}
+                      {speed.verdict === 'slow' && <span className="text-faint">（建议换源）</span>}
+                    </span>
+                  ) : null}
+                </div>
+              )}
 
               {(info?.actor || info?.director) && (
                 <p className="mt-2 text-xs text-faint line-clamp-1">

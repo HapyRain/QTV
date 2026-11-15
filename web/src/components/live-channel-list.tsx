@@ -309,7 +309,7 @@ export function LiveChannelList({ channels, groups, currentUrl, onSelect, onFilt
               disabled={isProbing || filtered.length === 0}
               onClick={() => void probe(filtered)}
             >
-              {isProbing && probeProgress ? formatProbeProgress(probeProgress) : '测活'}
+              {isProbing && probeProgress ? formatProbeProgress(probeProgress) : '检测'}
             </button>
             {isProbing ? (
               <button

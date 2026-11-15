@@ -23,7 +23,7 @@ const AuthContext = createContext<AuthContextValue>({
   checked: true,
   verified: true,
   setupRequired: false,
-  version: '1.0',
+  version: '1.1',
   openLogin: () => {},
   logout: async () => {},
 });
@@ -33,7 +33,7 @@ export function useAuth(): AuthContextValue {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [version, setVersion] = useState<string | null>('1.0');
+  const [version, setVersion] = useState<string | null>('1.1');
   const queryClient = useQueryClient();
 
   useEffect(() => {

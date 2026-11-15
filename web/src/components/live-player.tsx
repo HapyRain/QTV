@@ -111,7 +111,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
         nativeCleanup = null;
         if (disposed || destroyed) return;
         if (allowProxyFallback && !mediaUrl.startsWith(STREAM_PROXY_PREFIX)) {
-          showHint('直连受限，自动切换代理线路...');
+          showHint('网络受限，换条线路重试…');
           setupNative(video, proxyUrl(url), false, failMessage);
           return;
         }
@@ -175,7 +175,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
             !mediaUrl.startsWith(STREAM_PROXY_PREFIX) &&
             (data.details === 'manifestLoadError' || data.type === Hls.ErrorTypes.NETWORK_ERROR)
           ) {
-            showHint('直连受限，自动切换代理线路...');
+            showHint('网络受限，换条线路重试…');
             setupHls(video, proxyUrl(url), 'proxy');
             return;
           }
@@ -233,7 +233,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
       player.on(Mpegts.Events.ERROR, (errType: string) => {
         if (disposed || destroyed) return;
         if (!playbackStarted && allowProxyFallback && !mediaUrl.startsWith(STREAM_PROXY_PREFIX)) {
-          showHint('直连受限，自动切换代理线路...');
+          showHint('网络受限，换条线路重试…');
           void setupFlv(video, proxyUrl(url), false);
           return;
         }

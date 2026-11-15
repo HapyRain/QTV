@@ -25,6 +25,9 @@ signing.properties
 
 # 构建中间产物
 .kotlin/
+.eslintcache
+coverage/
+*.tsbuildinfo
 
 # 前端（web/）
 web/node_modules/
@@ -41,3 +44,8 @@ ios/*.ipa
 *.ipa
 ios/QTV.xcodeproj/xcuserdata/
 ios/QTV.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Windows 桌面端（Electron）
+windows/node_modules/
+windows/dist/
+windows/out/
