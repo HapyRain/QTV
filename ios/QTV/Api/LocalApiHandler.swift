@@ -76,7 +76,7 @@ final class LocalApiHandler: NSObject, WKURLSchemeHandler {
     private func makeHttpResponse(url: URL, statusCode: Int = 200, contentType: String, contentLength: Int? = nil) -> HTTPURLResponse {
         var headers: [String: String] = [
             "Content-Type": contentType,
-            "Access-Control-Allow-Origin": "*",
+            // 不返回通配 CORS：本机接口只面向同源前端，任意网页都不该被允许跨域读取
             "Cache-Control": "no-store"
         ]
         if let len = contentLength {

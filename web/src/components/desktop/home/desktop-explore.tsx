@@ -15,8 +15,9 @@ import { requestShowDownloadManager } from '@/components/download-manager';
 import { api } from '@/lib/client-api';
 import { db } from '@/lib/db';
 import { useAppStore, resolveSource, isInDisabledSubscription, isSourceDisabled } from '@/lib/store';
-import type { DoubanItem, SearchResultItem } from '@/lib/types';
-import { buildWatchUrl, cn, formatTime, validateSourceUrl } from '@/lib/utils';
+import type { DoubanItem, SearchResultItem, SourceSearchOutcome } from '@/lib/types';
+import { useToast } from '@/components/toast';
+import { buildWatchUrl, cn, formatDisableTtl, formatTime, validateSourceUrl } from '@/lib/utils';
 
 /**
  * Windows 桌面宽屏首页（探索）：
@@ -53,6 +54,12 @@ export function DesktopExplore() {
   const [input, setInput] = useState(urlQuery);
   const [doubanTab, setDoubanTab] = useState<DoubanTab>('tv');
   const [detailItem, setDetailItem] = useState<SearchResultItem | null>(null);
+  // 逐源流式结果：与移动端一致，先到的源先出卡片，不用等最慢的源
+  const [streamedOutcomes, setStreamedOutcomes] = useState<SourceSearchOutcome[]>([]);
+  const { toast } = useToast();
+
+  const sourceNameOf = (key: string) =>
+    resolveSource({ customAPIs, envSources }, key)?.name || key;
 
   // 地址栏变化（含点海报标题跳搜索 / 返回探索）时回填输入框
   useEffect(() => setInput(urlQuery), [urlQuery]);
@@ -79,14 +86,42 @@ export function DesktopExplore() {
     staleTime: 30 * 60_000,
   });
   const posters = recommendQuery.data?.items ?? [];
+  // 与移动端一致：热门电影（movie）的海报直连豆瓣图床易 403，强制走本地代理
+  const posterMode = doubanTab === 'movie' ? 'proxy' : imageProxyMode;
+  const posterProxy = doubanTab === 'movie' ? undefined : customImageProxy;
 
   const searchQuery = useQuery({
     queryKey: ['desktop-search', urlQuery, selectedKeys, yellowFilter],
-    queryFn: ({ signal }) => api.search(urlQuery.slice(0, 100), selectedSources, yellowFilter, { signal }),
+    queryFn: ({ signal }) => {
+      setStreamedOutcomes([]);
+      return api.search(urlQuery.slice(0, 100), selectedSources, yellowFilter, {
+        signal,
+        // 与移动端一致：逐源结算即渲染，并记录源健康度（连续无响应自动熔断）
+        onSource: (outcome) => {
+          setStreamedOutcomes((prev) => [...prev.filter((o) => o.sourceKey !== outcome.sourceKey), outcome]);
+          for (const ev of useAppStore.getState().recordSourceHealth([outcome])) {
+            toast(
+              ev.permanent
+                ? `「${sourceNameOf(ev.key)}」多次无响应，已自动停用`
+                : `「${sourceNameOf(ev.key)}」超时，暂停 ${formatDisableTtl(ev.ttlMs ?? 0)}`,
+              'warning'
+            );
+          }
+        },
+      });
+    },
     enabled: Boolean(urlQuery) && selectedSources.length > 0,
     staleTime: 300_000,
   });
-  const groups = useMemo(() => aggregateResults(searchQuery.data?.list ?? []), [searchQuery.data]);
+  const streamedList = useMemo(() => streamedOutcomes.flatMap((o) => o.list), [streamedOutcomes]);
+  const groups = useMemo(() => {
+    const list = searchQuery.data
+      ? streamedOutcomes.length > 0
+        ? streamedList
+        : searchQuery.data.list
+      : streamedList;
+    return aggregateResults(list);
+  }, [searchQuery.data, streamedList, streamedOutcomes.length]);
 
   // IndexedDB 实时驱动「继续观看」：dexie 的 liveQuery 自带走查与卸载
   const recentHistory = useLiveQuery(
@@ -141,8 +176,8 @@ export function DesktopExplore() {
           <section className="desk-hero" aria-label="今日精选">
             <SmartImage
               url={posters[0].cover}
-              mode={imageProxyMode}
-              customProxy={customImageProxy}
+              mode={posterMode}
+              customProxy={posterProxy}
               alt=""
               className="desk-hero-img"
               loading="eager"
@@ -358,7 +393,13 @@ export function DesktopExplore() {
               ) : (
                 <div className="poster-grid-desktop">
                   {posters.map((item) => (
-                    <PosterCard key={item.id} item={item} onOpen={() => searchByTitle(item.title)} />
+                    <PosterCard
+                      key={item.id}
+                      item={item}
+                      onOpen={() => searchByTitle(item.title)}
+                      mode={posterMode}
+                      customProxy={posterProxy}
+                    />
                   ))}
                 </div>
               )}
@@ -416,9 +457,17 @@ function SectionTitle({ title, action }: { title: string; action?: React.ReactNo
 }
 
 /** 豆瓣海报卡：海报 + 评分 + 标题，整卡点击 → 用片名聚合搜索 */
-function PosterCard({ item, onOpen }: { item: DoubanItem; onOpen: () => void }) {
-  const imageProxyMode = useAppStore((s) => s.imageProxyMode);
-  const customImageProxy = useAppStore((s) => s.customImageProxy);
+function PosterCard({
+  item,
+  onOpen,
+  mode,
+  customProxy,
+}: {
+  item: DoubanItem;
+  onOpen: () => void;
+  mode: 'direct' | 'proxy' | 'custom';
+  customProxy?: string;
+}) {
   const [imgFailed, setImgFailed] = useState(false);
   const showImg = Boolean(item.cover) && !imgFailed;
 
@@ -433,8 +482,8 @@ function PosterCard({ item, onOpen }: { item: DoubanItem; onOpen: () => void }) 
         {showImg ? (
           <SmartImage
             url={item.cover}
-            mode={imageProxyMode}
-            customProxy={customImageProxy}
+            mode={mode}
+            customProxy={customProxy}
             alt={item.title}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
             onExhausted={() => setImgFailed(true)}

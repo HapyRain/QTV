@@ -1,9 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Drawer } from './drawer';
 import { Icon } from './icon';
 import { useToast } from './toast';
+import { useDesktopShell } from '@/lib/desktop';
 import { db, type DownloadTaskEntry } from '@/lib/db';
 import {
   PauseResumeController,
@@ -24,6 +26,14 @@ import {
 import { Switch } from './settings-shared';
 
 const MAX_CONCURRENT_DOWNLOADS = 3;
+
+/**
+ * 原生桥（Android/iOS/Windows 壳）只有一个活动文件句柄，并发必须为 1：
+ * 否则后启动的任务会在 saveBegin 时删掉前一集正在写的文件，并把两集分片
+ * 交错写进同一个句柄，最终产出损坏的 MP4。
+ */
+const maxConcurrentDownloads = (): number =>
+  nativeSaveBridge() ? 1 : MAX_CONCURRENT_DOWNLOADS;
 const PROGRESS_PERSIST_INTERVAL_MS = 1000;
 const ADD_TASK_EVENT = 'libretv:add-download';
 const SHOW_MANAGER_EVENT = 'libretv:show-download-manager';
@@ -168,11 +178,12 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
 
   const scheduleNext = useCallback(() => {
     void (async () => {
+      const limit = maxConcurrentDownloads();
       const runningCount = running.current.size;
-      if (runningCount >= MAX_CONCURRENT_DOWNLOADS) return;
+      if (runningCount >= limit) return;
       const all = await db.downloads.orderBy('createdAt').toArray();
       const waiting = all.filter((t) => t.status === 'waiting' && !running.current.has(t.id));
-      for (const t of waiting.slice(0, MAX_CONCURRENT_DOWNLOADS - runningCount)) {
+      for (const t of waiting.slice(0, limit - runningCount)) {
         void startTask(t);
       }
     })();
@@ -226,14 +237,25 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
     };
   }, [refresh, scheduleNext, toast]);
 
+  // 队列引擎必须**无条件**初始化：桌面端把缓存中心换成 /cache 整页后抽屉 isOpen 恒为 false，
+  // 之前挂在 isOpen 分支里，导致桌面端刷新后内存 tasks 恒为空（「暂停/继续/删除」全部无响应），
+  // 上次异常退出残留的 downloading 任务也永远卡死、不会被重新调度。
   useEffect(() => {
-    if (!isOpen) return;
-    setCapability(detectSavingCapability());
-    setChunkCache(supportsChunkCache());
-    setProxy(loadDownloadSettings().proxy);
-    refresh();
-    scheduleNext();
-  }, [isOpen, refresh, scheduleNext]);
+    void (async () => {
+      // 本次进程里没有任何任务在跑：库里标记 downloading 的都是上次崩溃/关窗留下的僵尸
+      const all = await db.downloads.toArray();
+      for (const t of all) {
+        if (t.status === 'downloading' && !running.current.has(t.id)) {
+          await db.downloads.update(t.id, { status: 'paused', updatedAt: Date.now() });
+        }
+      }
+      setCapability(detectSavingCapability());
+      setChunkCache(supportsChunkCache());
+      setProxy(loadDownloadSettings().proxy);
+      refresh();
+      scheduleNext();
+    })();
+  }, [refresh, scheduleNext]);
 
   const onToggleProxy = (next: boolean) => {
     setProxy(saveDownloadSettings({ proxy: next }).proxy);
@@ -285,16 +307,21 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
   // 整页缓存中心通过这几个事件操作队列：队列引擎只保留一份（GlobalDownloadManager），
   // 页面不自己再起一套调度，避免同一任务被下载两次。
   useEffect(() => {
-    const findEntry = (id: string) => tasks.find((t) => t.id === id);
+    // 内存 tasks 可能还没同步（桌面端 /cache 页刚打开时尤其明显）：查不到就回落到数据库，
+    // 否则按钮点了没反应。
+    const findEntry = async (id: string) =>
+      tasks.find((t) => t.id === id) ?? (await db.downloads.get(id));
     const onPauseResume = (e: Event) => {
       const id = (e as CustomEvent<string>).detail;
-      const entry = findEntry(id);
-      if (entry) void onPauseResumeHandler(entry);
+      void findEntry(id).then((entry) => {
+        if (entry) void onPauseResumeHandler(entry);
+      });
     };
     const onCancel = (e: Event) => {
       const id = (e as CustomEvent<string>).detail;
-      const entry = findEntry(id);
-      if (entry) void onCancelHandler(entry);
+      void findEntry(id).then((entry) => {
+        if (entry) void onCancelHandler(entry);
+      });
     };
     window.addEventListener('qtv:download-pause-resume', onPauseResume);
     window.addEventListener('qtv:download-cancel', onCancel);
@@ -336,7 +363,7 @@ export function DownloadManager({ isOpen, onClose }: { isOpen: boolean; onClose:
             {chunkCache ? ' · 支持断点续传' : ''}
           </span>
           <span>
-            并发 {Math.min(running.current.size, MAX_CONCURRENT_DOWNLOADS)}/{MAX_CONCURRENT_DOWNLOADS}
+            并发 {Math.min(running.current.size, maxConcurrentDownloads())}/{maxConcurrentDownloads()}
           </span>
         </div>
         {tasks.length === 0 && (
@@ -436,11 +463,9 @@ export function enqueueDownload(payload: AddDownloadPayload): void {
 }
 
 export function requestShowDownloadManager(): void {
-  // 桌面端已改成 /cache 整页：这里直接跳路由；移动端仍由全局抽屉接管
-  if (typeof window !== 'undefined' && (window as unknown as { QTVDesktop?: unknown }).QTVDesktop) {
-    window.location.assign('/cache');
-    return;
-  }
+  // 桌面端已改成 /cache 整页，但这里**不能**用 window.location.assign：
+  // 整页硬刷新会卸载当前页面，掐断正在跑的下载流，任务在库里永久卡在 downloading。
+  // 改成发事件，由 Header 用 router.push 软路由过去。
   window.dispatchEvent(new CustomEvent(SHOW_MANAGER_EVENT));
 }
 
@@ -455,10 +480,16 @@ export function cancelDownloadTask(id: string): void {
 
 export function GlobalDownloadManager() {
   const [open, setOpen] = useState(false);
+  const desktop = useDesktopShell();
+  const router = useRouter();
   useEffect(() => {
-    const onShow = () => setOpen(true);
+    // 桌面端走 /cache 整页（软路由，保留页面内的下载调度），移动端仍是抽屉
+    const onShow = () => {
+      if (desktop) router.push('/cache');
+      else setOpen(true);
+    };
     window.addEventListener(SHOW_MANAGER_EVENT, onShow);
     return () => window.removeEventListener(SHOW_MANAGER_EVENT, onShow);
-  }, []);
-  return <DownloadManager isOpen={open} onClose={() => setOpen(false)} />;
+  }, [desktop, router]);
+  return <DownloadManager isOpen={desktop ? false : open} onClose={() => setOpen(false)} />;
 }

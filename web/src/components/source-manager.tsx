@@ -957,8 +957,11 @@ export function ConfigIoPanel() {
   const doExport = async () => {
     try {
       const json = await exportConfig();
-      // Android WebView 的 blob 下载会静默失败：有原生桥时直接写到系统「下载」目录
-      if (typeof window !== 'undefined' && (window as { QTV?: unknown }).QTV) {
+      // Android WebView 的 blob 下载会静默失败：有原生桥时直接写到系统「下载」目录。
+      // 但原生保存桥是单槽位的（同一时刻只能有一个文件句柄），桌面端下载任务正在跑时
+      // 抢桥会把正在写的 MP4 删掉，所以桌面端一律走浏览器 blob 下载。
+      const desktopShell = typeof window !== 'undefined' && Boolean((window as { QTVDesktop?: unknown }).QTVDesktop);
+      if (!desktopShell && typeof window !== 'undefined' && (window as { QTV?: unknown }).QTV) {
         const filename = `QTV-Backup_${Date.now()}.json`;
         const target = nativeSaveTarget(filename);
         await target.write(new TextEncoder().encode(json));

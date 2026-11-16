@@ -52,3 +52,6 @@ windows/out/
 
 # 本地工具配置
 .commandcode/
+
+# 本地过程笔记（不发布）
+NOTES.md

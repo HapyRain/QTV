@@ -82,6 +82,7 @@ final class LocalHttpServer {
 
                 var contentLength = 0
                 var rangeHeader: String?
+                var hostHeader = ""
                 for line in lines.dropFirst() {
                     let lower = line.lowercased()
                     if lower.hasPrefix("content-length:") {
@@ -89,7 +90,20 @@ final class LocalHttpServer {
                         contentLength = Int(val) ?? 0
                     } else if lower.hasPrefix("range:") {
                         rangeHeader = line.dropFirst("range:".count).trimmingCharacters(in: .whitespaces)
+                    } else if lower.hasPrefix("host:") {
+                        hostHeader = line.dropFirst("host:".count).trimmingCharacters(in: .whitespaces)
                     }
+                }
+
+                // DNS rebinding 防护：只接受本机 Host。恶意网页把自己的域名解析到
+                // 127.0.0.1 时，Host 头仍是那个域名，在这里被挡掉。
+                let hostName = hostHeader
+                    .split(separator: ":", maxSplits: 1).first.map(String.init)?
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                    .lowercased() ?? ""
+                if !["127.0.0.1", "localhost", "::1"].contains(hostName) {
+                    self.sendJsonError(conn: conn, code: 400, message: "bad host")
+                    return
                 }
 
                 let bodyStart = headerEnd.upperBound
@@ -336,7 +350,11 @@ final class LocalHttpServer {
         case "/api/local-file":
             handleLocalFile(method: method, path: qParam("path"), rangeHeader: rangeHeader, conn: conn)
 
-        case "/api/douban", "/api/hot-list":
+        case "/api/douban":
+            handleDouban(collection: qParam("type") == "movie" ? "movie" : "tv",
+                         start: qParam("pageStart"), count: qParam("pageSize"), conn: conn)
+
+        case "/api/hot-list":
             sendJson(conn: conn, obj: ["items": []])
 
         case "/api/bangumi/calendar":
@@ -345,6 +363,61 @@ final class LocalHttpServer {
         default:
             sendJsonError(conn: conn, code: 404, message: "未知接口 \(url.path)")
         }
+    }
+
+    // MARK: - /api/douban
+    //
+    // iOS 实际由本文件（127.0.0.1:18688）提供接口，LocalApiHandler 的 qtv:// 只是兜底。
+    // 之前这里直接回空数组，导致真机首页豆瓣推荐恒为空。
+
+    private func handleDouban(collection: String, start rawStart: String?, count rawCount: String?, conn: NWConnection) {
+        let start = max(0, min(200, Int(rawStart ?? "") ?? 0))
+        let count = max(1, min(50, Int(rawCount ?? "") ?? 20))
+        let tag = collection == "movie" ? "movie" : "tv"
+        guard let target = URL(string: "https://m.douban.com/rexxar/api/v2/subject_collection/\(tag)_hot/items?start=\(start)&count=\(count)") else {
+            sendJson(conn: conn, obj: ["items": []])
+            return
+        }
+        var req = URLRequest(url: target)
+        req.timeoutInterval = 9
+        // rexxar 接口对 UA 敏感：桌面 UA 会被判成爬虫返回空体
+        req.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        req.setValue("https://m.douban.com/", forHTTPHeaderField: "Referer")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        NetClient.session.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self else {
+                conn.cancel()
+                return
+            }
+            var items: [[String: Any]] = []
+            if let data,
+               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let list = root["subject_collection_items"] as? [[String: Any]] {
+                for o in list {
+                    guard let title = o["title"] as? String, !title.isEmpty else { continue }
+                    var item: [String: Any] = [
+                        "id": o["id"] as? String ?? "",
+                        "title": title,
+                        "cover": "",
+                        "isTv": tag == "tv",
+                    ]
+                    if let pic = o["pic"] as? [String: Any] {
+                        item["cover"] = (pic["large"] as? String) ?? (pic["normal"] as? String) ?? ""
+                    } else if let cover = o["cover"] as? [String: Any] {
+                        item["cover"] = cover["url"] as? String ?? ""
+                    }
+                    if let rating = o["rating"] as? [String: Any],
+                       let value = rating["value"] as? Double, value > 0 {
+                        item["rating"] = String(format: "%.1f", value)
+                    }
+                    items.append(item)
+                }
+            }
+            self.sendJson(conn: conn, obj: ["items": items])
+        }.resume()
     }
 
     private func parseSources(_ arr: Any?) -> [SourceConfig] {
@@ -391,7 +464,7 @@ final class LocalHttpServer {
         }
 
         if stream {
-            let header = "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
             conn.send(content: Data(header.utf8), completion: .idempotent)
             let sendLock = NSLock()
             let outcomes = CmsApi.searchAll(wd: wd, sources: sources, filterAdult: filterAdult) { [weak self] o in
@@ -710,7 +783,7 @@ final class LocalHttpServer {
 
         // 空文件（保存失败/刚创建）：按 200 + 0 长度回，避免 Range 判定成 416
         if size == 0 {
-            let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 0\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 0\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
             conn.send(content: Data(head.utf8), isComplete: true, completion: .contentProcessed { _ in conn.cancel() })
             return
         }
@@ -756,7 +829,6 @@ final class LocalHttpServer {
             "Content-Type: video/mp4",
             "Content-Length: \(end - start + 1)",
             "Accept-Ranges: bytes",
-            "Access-Control-Allow-Origin: *",
             "Cache-Control: no-store",
             "Connection: close"
         ]
@@ -827,9 +899,8 @@ final class LocalHttpServer {
             "HTTP/1.1 \(status)",
             "Content-Type: \(contentType)",
             "Content-Length: \(body.count)",
-            "Access-Control-Allow-Origin: *",
             "Access-Control-Allow-Methods: GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers: *",
+            "Access-Control-Allow-Headers: Content-Type",
             "Cache-Control: \(cacheControl)",
             "Connection: close",
             "",

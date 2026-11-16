@@ -1526,10 +1526,13 @@ export function createLocalServer({ wwwDir, downloadDir } = {}) {
         // 目标校验（协议白名单 + DNS 全量解析）+ 64MB 上限都在 fetchBuffer 内完成
         const r = await fetchBuffer(targetUrl, { timeoutMs: 15000, maxBytes: MAX_MEDIA_BYTES });
         const ct = r.contentType.toLowerCase();
+        // 必须带 r.ok：上游 403/404 返回的 HTML 错误页若带 .m3u8 地址，会被当成播放列表
+        // 改写成 200 OK，播放器拿到的就是一份「假 playlist」
         const looksLikeM3u8 =
-          ct.includes('mpegurl') ||
-          /\.m3u8(\?|$)/i.test(r.finalUrl) ||
-          r.buffer.subarray(0, 16).toString('utf-8').startsWith('#EXTM3U');
+          r.ok &&
+          (ct.includes('mpegurl') ||
+            /\.m3u8(\?|$)/i.test(r.finalUrl) ||
+            r.buffer.subarray(0, 16).toString('utf-8').startsWith('#EXTM3U'));
 
         if (looksLikeM3u8) {
           const text = decodeBuffer(r.buffer, 'utf-8');
@@ -1545,7 +1548,8 @@ export function createLocalServer({ wwwDir, downloadDir } = {}) {
 
         res.writeHead(r.status || 200, {
           'Content-Type': r.contentType || 'application/octet-stream',
-          'Cache-Control': 'public, max-age=3600',
+          // 失败响应不能缓存：封面偶发 403/404 会被浏览器记住一小时，期间怎么刷都出不来图
+          'Cache-Control': r.ok ? 'public, max-age=3600' : 'no-store',
         });
         res.end(r.buffer);
         return;

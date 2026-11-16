@@ -81,6 +81,19 @@ export class UserCancelledError extends Error {
 const NATIVE_CHUNK_BYTES = 49_152;
 
 /**
+ * 原生桥是**单槽位**的：Kotlin/Swift/preload 三端都只维护一个活动句柄，
+ * saveBegin 会直接 abort 并删除上一个未完成文件。所以同一时刻只允许一个
+ * 原生保存会话，否则「连续缓存两集」或「边缓存边导出备份」会互相删文件、
+ * 并把两个任务的分片交错写进同一个文件，产出损坏的 MP4。
+ */
+let nativeSessionOwner: string | null = null;
+
+/** 当前是否有原生保存会话正在进行（供调用方给出友好提示/排期） */
+export function nativeSaveBusy(): boolean {
+  return nativeSessionOwner !== null;
+}
+
+/**
  * App 壳原生保存目标：write 即分块交给原生，边下边写。
  * 之前这里走「内存聚合 + 结束时一次性写桥」，整集几百 MB 会先把 WebView 内存打爆；
  * 而且 WebView 里 showSaveFilePicker 不存在，pickSaveTarget 会落到内存分支。
@@ -88,12 +101,21 @@ const NATIVE_CHUNK_BYTES = 49_152;
 export function nativeSaveTarget(filename: string): SaveTarget {
   const bridge = nativeSaveBridge();
   if (!bridge) throw new Error('当前环境不支持原生保存');
+  const owner = `save_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   let opened = false;
   let savedPath = '';
   const ensureOpen = () => {
     if (opened) return;
+    // 抢占单槽位：被别的任务占着就明确失败，绝不复用句柄写出坏文件
+    if (nativeSessionOwner !== null && nativeSessionOwner !== owner) {
+      throw new Error('另一个保存任务正在进行，请等待它完成');
+    }
+    nativeSessionOwner = owner;
     opened = true;
     bridge.saveBegin(filename);
+  };
+  const release = () => {
+    if (nativeSessionOwner === owner) nativeSessionOwner = null;
   };
   return {
     kind: 'native',
@@ -106,7 +128,11 @@ export function nativeSaveTarget(filename: string): SaveTarget {
     async close() {
       ensureOpen();
       opened = false;
-      if (!bridge.saveEnd()) throw new Error('保存到设备失败');
+      try {
+        if (!bridge.saveEnd()) throw new Error('保存到设备失败');
+      } finally {
+        release();
+      }
       // 原生桥在 finish 之后才知道最终落盘位置：没有这个值前端就无法给出「播放/打开」入口。
       // iOS 走 messageHandler（异步），路径要等原生处理完 end 再回写，因此这里短轮询一下；
       // Android/Windows 是同步桥，第一次就能拿到。
@@ -130,6 +156,8 @@ export function nativeSaveTarget(filename: string): SaveTarget {
         bridge.saveAbort?.();
       } catch {
         /* 已关闭则忽略 */
+      } finally {
+        release();
       }
     },
   };

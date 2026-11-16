@@ -3,6 +3,7 @@ import {
   UserCancelledError,
   detectSavingCapability,
   nativeSaveBridge,
+  nativeSaveBusy,
   nativeSaveTarget,
   pickSaveTarget,
 } from './download-saver';
@@ -95,5 +96,31 @@ describe('download-saver · App 壳原生保存', () => {
       },
     };
     await expect(pickSaveTarget('a.mp4')).rejects.toBeInstanceOf(UserCancelledError);
+  });
+
+  it('原生桥是单槽位：前一个保存未收尾时，另一个任务必须明确失败而不是共用句柄', async () => {
+    installBridge();
+    const first = nativeSaveTarget('第 1 集.mp4');
+    await first.write(new Uint8Array([1, 2, 3]));
+    expect(nativeSaveBusy()).toBe(true);
+
+    // 第二个任务抢占同一个单槽位：必须抛错，不能把两集分片写进同一个文件
+    const second = nativeSaveTarget('第 2 集.mp4');
+    await expect(second.write(new Uint8Array([4, 5, 6]))).rejects.toThrow('另一个保存任务正在进行');
+
+    // 第一个任务正常收尾后，槽位释放，后续任务可以继续
+    await first.close();
+    expect(nativeSaveBusy()).toBe(false);
+    const third = nativeSaveTarget('第 3 集.mp4');
+    await third.write(new Uint8Array([7]));
+    await third.close();
+  });
+
+  it('保存失败也要释放槽位，避免后续下载永久被卡住', async () => {
+    installBridge(false);
+    const failed = nativeSaveTarget('bad.mp4');
+    await failed.write(new Uint8Array([1]));
+    await expect(failed.close()).rejects.toThrow('保存到设备失败');
+    expect(nativeSaveBusy()).toBe(false);
   });
 });
