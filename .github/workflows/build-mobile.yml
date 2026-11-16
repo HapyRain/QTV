@@ -2,7 +2,7 @@ name: Build QTV (Android · iOS · Windows)
 
 on:
   push:
-    branches: [ main, master, "feat**" ]
+    branches: [ main ]
   pull_request:
   workflow_dispatch:
 

@@ -108,6 +108,17 @@ function openDownloadDir() {
   }
 }
 
+/** 同名文件不覆盖：追加 (1)、(2)…，避免下载第二集时把已存在的那一集冲掉 */
+function uniqueTargetPath(dir, filename) {
+  const ext = path.extname(filename);
+  const stem = path.basename(filename, ext);
+  let candidate = path.join(dir, filename);
+  for (let i = 1; fs.existsSync(candidate); i++) {
+    candidate = path.join(dir, `${stem} (${i})${ext}`);
+  }
+  return candidate;
+}
+
 /** 只允许打开下载目录内的文件：渲染层传来的路径不可信，出界一律拒绝 */
 function openDownloadedFile(target) {
   try {
@@ -381,20 +392,17 @@ function registerIpcHandlers() {
   });
 
   // Chunked stream-to-disk download bridge compatible with window.QTV
+  // 用 fd + 同步写入而不是 createWriteStream：renderer 走 sendSync，拿回 true 就代表
+  // 这块已经进了内核页缓存；换成流的话 write() 只是入队，finish 立刻回 ok 会让
+  // renderer 打开一个还没刷盘的文件。
   ipcMain.on('download:begin', (event, { filename }) => {
     try {
+      const dir = getDefaultDownloadDir();
       const safeName = String(filename || `QTV_${Date.now()}.mp4`).replace(/[<>:"/\\|?*]+/g, '_');
-      const targetPath = path.join(getDefaultDownloadDir(), safeName);
+      const targetPath = uniqueTargetPath(dir, safeName);
       const id = `dl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const stream = fs.createWriteStream(targetPath);
-      const item = { stream, targetPath, error: '' };
-      // 磁盘满/权限错误只会以异步 error 事件冒出来，同步 write 不会抛，
-      // 所以先记下来，让后续 sendSync 如实返回 false
-      stream.on('error', (err) => {
-        item.error = err?.message || String(err);
-        console.error('[QTV] 写下载分片失败:', targetPath, item.error);
-      });
-      activeDownloads.set(id, item);
+      const fd = fs.openSync(targetPath, 'w');
+      activeDownloads.set(id, { fd, targetPath, error: '' });
       event.returnValue = id;
     } catch (err) {
       console.error('[QTV] 创建下载文件失败:', filename, err?.message || err);
@@ -409,9 +417,10 @@ function registerIpcHandlers() {
       return;
     }
     try {
-      item.stream.write(Buffer.from(base64Chunk, 'base64'));
-      event.returnValue = !item.error;
+      fs.writeSync(item.fd, Buffer.from(base64Chunk, 'base64'));
+      event.returnValue = true;
     } catch (err) {
+      // 记下来：磁盘满不会让后续 write 抛出有意义的错，finish 必须知道这一段没写进去
       item.error = err?.message || String(err);
       console.error('[QTV] 写下载分片失败:', item.targetPath, item.error);
       event.returnValue = false;
@@ -420,38 +429,57 @@ function registerIpcHandlers() {
 
   ipcMain.on('download:finish', (event, { id }) => {
     // 回 { ok, path }：前端要拿落盘路径做「播放 / 打开文件夹」入口，只回 true/false 等于没存
-    const failed = () => {
-      event.returnValue = { ok: false, path: '' };
-    };
     const item = activeDownloads.get(id);
     if (!item) {
-      failed();
+      event.returnValue = { ok: false, path: '' };
       return;
     }
     activeDownloads.delete(id);
     if (item.error) {
-      failed();
+      // 写失败留下的半截文件不能留在下载目录里，否则用户会看到一个「能打开但放不完」的片子
+      try {
+        fs.closeSync(item.fd);
+      } catch {
+        /* 已关闭 */
+      }
+      try {
+        fs.unlinkSync(item.targetPath);
+      } catch {
+        /* ignore */
+      }
+      event.returnValue = { ok: false, path: '' };
       return;
     }
     try {
-      item.stream.end();
+      // fsync 之后再回包：否则用户点「打开」时读到的可能是停留在页缓存里的残缺文件
+      fs.fsyncSync(item.fd);
+      fs.closeSync(item.fd);
       event.returnValue = { ok: true, path: item.targetPath };
     } catch (err) {
       console.error('[QTV] 收尾下载文件失败:', item.targetPath, err?.message || err);
-      failed();
+      try {
+        fs.closeSync(item.fd);
+      } catch {
+        /* 已关闭 */
+      }
+      event.returnValue = { ok: false, path: '' };
     }
   });
 
   ipcMain.on('download:abort', (event, { id }) => {
     const item = activeDownloads.get(id);
     if (item) {
+      activeDownloads.delete(id);
       try {
-        item.stream.destroy();
+        fs.closeSync(item.fd);
+      } catch {
+        /* 已关闭 */
+      }
+      try {
         fs.unlinkSync(item.targetPath);
       } catch {
         /* ignore */
       }
-      activeDownloads.delete(id);
     }
     event.returnValue = true;
   });

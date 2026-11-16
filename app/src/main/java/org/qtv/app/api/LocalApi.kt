@@ -48,6 +48,39 @@ interface PlayerHost {
 
 object LocalApi {
 
+    /**
+     * 后台任务池（搜索 / 画质 / 测活共用）。
+     * 之前每处都直接 `Thread { }.start()`：请求被中止或快速切页时线程数没有上界，
+     * 高频探测能把进程线程数顶到几百个。这里固定上限 + 有界队列，提交失败时
+     * 立即 finish 队列，前端拿到空结果而不是挂住。
+     */
+    private val ioPool = java.util.concurrent.ThreadPoolExecutor(
+        2,
+        8,
+        30L,
+        java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.ArrayBlockingQueue(32),
+        { r -> Thread(r, "qtv-local-api").apply { isDaemon = true } },
+        java.util.concurrent.ThreadPoolExecutor.AbortPolicy(),
+    )
+
+    /** 提交后台任务；池已满/已关闭时立即收尾队列，让前端拿到结束信号而不是一直等 */
+    private fun submit(queue: QueueInputStream, task: () -> Unit) {
+        try {
+            ioPool.execute { try { task() } catch (_: Throwable) { /* 已兜底 */ } finally { queue.finish() } }
+        } catch (_: Throwable) {
+            queue.finish()
+        }
+    }
+
+    /**
+     * 批量探测专用池：/api/quality 一次最多 50 条目，外层 ioPool 若用它并行会自锁
+     * （任务线程 join 同池任务），所以单独一个 6 线程池兜住并发。
+     */
+    private val probePool = java.util.concurrent.Executors.newFixedThreadPool(6) { r ->
+        Thread(r, "qtv-probe").apply { isDaemon = true }
+    }
+
     /** MainActivity 注入；为空时 /api/player-state 只回 204 */
     @Volatile
     var playerHost: PlayerHost? = null
@@ -155,7 +188,7 @@ object LocalApi {
             // 非流式也异步返回：shouldInterceptRequest 拿到 QueueInputStream 立即返回，
             // 不再用 runBlocking 占住 WebView 的请求线程（多源并发时会互相饿死）
             val queue = QueueInputStream()
-            Thread {
+            submit(queue) {
                 try {
                     val outcomes = ArrayList<SourceOutcome>()
                     runBlocking {
@@ -166,15 +199,13 @@ object LocalApi {
                     queue.offer(
                         (JSONObject().put("type", "done").put("list", JSONArray()).put("failures", JSONArray()).toString() + "\n").toByteArray()
                     )
-                } finally {
-                    queue.finish()
                 }
-            }.start()
+            }
             return WebResourceResponse("application/json", "utf-8", 200, "OK", corsHeaders(), queue)
         }
         // NDJSON 流：逐源结算即推（前端边搜边渲染的体验与网页版一致）
         val queue = QueueInputStream()
-        Thread {
+        submit(queue) {
             try {
                 runBlocking {
                     val outcomes = ArrayList<SourceOutcome>()
@@ -186,10 +217,8 @@ object LocalApi {
                 }
             } catch (e: Throwable) {
                 queue.offer((JSONObject().put("type", "done").put("list", JSONArray()).put("failures", JSONArray()).toString() + "\n").toByteArray())
-            } finally {
-                queue.finish()
             }
-        }.start()
+        }
         return WebResourceResponse("application/x-ndjson", "utf-8", 200, "OK", corsHeaders(), queue)
     }
 
@@ -529,48 +558,37 @@ object LocalApi {
             .put("error", r.error ?: JSONObject.NULL)
 
         fun runAll(onEach: (JSONObject) -> Unit) {
-            val sem = java.util.concurrent.Semaphore(6)
-            val threads = items.map { (src, id) ->
-                Thread {
-                    try {
-                        sem.acquire()
-                        onEach(resultJson(QualityProbe.probeQuality(src, id)))
-                    } catch (_: Exception) {
-                    } finally {
-                        sem.release()
-                    }
+            // 固定 6 线程池：一次最多 50 条目，之前每条目一个 Thread 会让线程数随批次线性增长
+            val futures = items.map { (src, id) ->
+                try {
+                    probePool.submit { onEach(resultJson(QualityProbe.probeQuality(src, id))) }
+                } catch (_: Throwable) {
+                    null
                 }
             }
-            threads.forEach { it.start() }
-            threads.forEach { try { it.join() } catch (_: Exception) {} }
+            futures.forEach { f -> try { f?.get() } catch (_: Throwable) {} }
         }
 
         if (!stream) {
             // 同样异步：逐条请求在 WebView 线程池里不再阻塞等待探测完成
             val queue = QueueInputStream()
-            Thread {
+            submit(queue) {
                 try {
                     val results = java.util.concurrent.ConcurrentLinkedQueue<JSONObject>()
                     runAll { results.add(it) }
                     queue.offer(JSONObject().put("results", JSONArray(results.toList())).toString().toByteArray())
                 } catch (_: Throwable) {
                     queue.offer(JSONObject().put("results", JSONArray()).toString().toByteArray())
-                } finally {
-                    queue.finish()
                 }
-            }.start()
+            }
             return WebResourceResponse("application/json", "utf-8", 200, "OK", corsHeaders(), queue)
         }
 
         val queue = QueueInputStream()
-        Thread {
-            try {
-                queue.offer((JSONObject().put("ping", true).toString() + "\n").toByteArray())
-                runAll { queue.offer((it.toString() + "\n").toByteArray()) }
-            } finally {
-                queue.finish()
-            }
-        }.start()
+        submit(queue) {
+            queue.offer((JSONObject().put("ping", true).toString() + "\n").toByteArray())
+            runAll { queue.offer((it.toString() + "\n").toByteArray()) }
+        }
         return WebResourceResponse("application/x-ndjson", "utf-8", 200, "OK", corsHeaders(), queue)
     }
     // —— /api/live/playlist：拉取并解析 M3U 订阅 ——
@@ -668,13 +686,9 @@ object LocalApi {
             return json(JSONObject().put("results", results).toString())
         }
         val queue = QueueInputStream()
-        Thread {
-            try {
-                for (u in urls) queue.offer((probeOne(u).toString() + "\n").toByteArray())
-            } finally {
-                queue.finish()
-            }
-        }.start()
+        submit(queue) {
+            for (u in urls) queue.offer((probeOne(u).toString() + "\n").toByteArray())
+        }
         return WebResourceResponse("application/x-ndjson", "utf-8", 200, "OK", corsHeaders(), queue)
     }
 

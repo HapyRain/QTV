@@ -49,3 +49,6 @@ ios/QTV.xcodeproj/project.xcworkspace/xcuserdata/
 windows/node_modules/
 windows/dist/
 windows/out/
+
+# 本地工具配置
+.commandcode/

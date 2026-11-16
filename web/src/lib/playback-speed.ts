@@ -134,9 +134,11 @@ async function fetchText(url: string, signal: AbortSignal, stage = ''): Promise<
 
 /** 只读前 256KB：够算速率，又不至于为了测速把整集拉下来 */
 async function sampleSegment(url: string, signal: AbortSignal): Promise<{ bytes: number; ms: number }> {
-  const started = performance.now();
   const res = await fetch(proxyUrl(url), { signal });
   if (!res.ok) throw new Error(`segment HTTP ${res.status}`);
+  // 从拿到响应头之后开始计时：建连 + 代理 TTFB 不属于「下载速度」，
+  // 256KB 的小样本里首包延迟占比很高，算进去会系统性低估带宽
+  const started = performance.now();
   const reader = res.body?.getReader();
   let bytes = 0;
   if (reader) {
@@ -200,7 +202,11 @@ export async function probePlaybackSpeed(
     opts.signal?.removeEventListener('abort', onAbort);
   }
 
-  cache.set(key, { at: Date.now(), result });
+  // 只缓存有效结论：超时/abort/防盗链得到的 unknown 是即时状态，缓存 10 分钟会让用户
+  // 在网络恢复或换集之后仍然看到「测速失败」，且期间无法重新测速
+  if (result.verdict !== 'unknown') {
+    cache.set(key, { at: Date.now(), result });
+  }
   return result;
 }
 

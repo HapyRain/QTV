@@ -930,34 +930,51 @@ async function probeLiveUrl(url) {
  * 再用 realpath 挡目录内指向外部的符号链接/junction。出界 403，缺失 404。
  */
 function resolveLocalFile(rawPath, baseDir) {
-  const norm = (p) => path.resolve(p).toLowerCase();
-  // junction / 目录重定向会让词法路径与 realpath 基准不一致：两边都先解析成真实路径
-  let base;
-  try {
-    base = norm(fs.realpathSync.native(baseDir));
-  } catch {
-    base = norm(baseDir);
+  // 跨平台：Windows 盘符路径在 POSIX 上会被当成相对子目录（"C:/x" 会被拼进缓存目录），
+  // 词法上落在围栏内、realpath 却 404 —— 两端判定必须一致，这里统一按出界 403 处理
+  if (process.platform !== 'win32' && /^[a-zA-Z]:[\\/]/.test(rawPath)) {
+    throw new HttpError(403, '只允许访问缓存目录内的文件');
   }
-  const target = path.resolve(base, rawPath);
-  if (!norm(target).startsWith(base + path.sep)) throw new HttpError(403, '只允许访问缓存目录内的文件');
+  const norm = (p) => path.resolve(p).toLowerCase();
+  // 两步校验，基准不能混用：
+  // 词法阶段用原始 baseDir，realpath 阶段用 realpath 后的 baseDir。
+  // 混用会误杀合法文件——Windows 的 8.3 短名（RUNNER~1）与展开后的长名不一致，
+  // path.resolve 之后再比前缀恒为 false。
+  const lexicalBase = path.resolve(baseDir);
+  const target = path.resolve(lexicalBase, rawPath);
+  if (!norm(target).startsWith(norm(lexicalBase) + path.sep)) {
+    throw new HttpError(403, '只允许访问缓存目录内的文件');
+  }
   let real;
   try {
     real = fs.realpathSync.native(target);
   } catch {
     throw new HttpError(404, '文件不存在');
   }
-  if (!norm(real).startsWith(base + path.sep)) throw new HttpError(403, '只允许访问缓存目录内的文件');
+  // junction / 目录重定向会让词法路径与真实路径不一致：出界判定以真实路径为准
+  let realBase;
+  try {
+    realBase = fs.realpathSync.native(baseDir);
+  } catch {
+    realBase = lexicalBase;
+  }
+  if (!norm(real).startsWith(norm(realBase) + path.sep)) {
+    throw new HttpError(403, '只允许访问缓存目录内的文件');
+  }
   const stat = fs.statSync(real);
   if (!stat.isFile()) throw new HttpError(404, '文件不存在');
   return { file: real, size: stat.size };
 }
 
 export function createLocalServer({ wwwDir, downloadDir } = {}) {
-  const resolvedWww =
+  // 必须先 resolve：调用方传进来的 wwwDir 可能带正斜杠（"E:/x/www"），
+  // 而下面 candidate.startsWith(resolvedWww + path.sep) 比较的是反斜杠，不归一化会全部 404
+  const resolvedWww = path.resolve(
     wwwDir ||
-    (fs.existsSync(path.join(__dirname, 'www', 'index.html'))
-      ? path.join(__dirname, 'www')
-      : path.join(ROOT_DIR, 'app', 'src', 'main', 'assets', 'www'));
+      (fs.existsSync(path.join(__dirname, 'www', 'index.html'))
+        ? path.join(__dirname, 'www')
+        : path.join(ROOT_DIR, 'app', 'src', 'main', 'assets', 'www'))
+  );
   // 离线缓存目录：主进程传入 app.getPath('videos')/QTV；CLI/测试直接跑时退回用户 Videos
   const resolvedVideos = path.resolve(downloadDir || path.join(os.homedir(), 'Videos', 'QTV'));
 

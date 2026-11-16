@@ -15,7 +15,11 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createLocalServer } from './local-api-server.mjs';
+
+/** 测试文件所在目录：npm test 的 cwd 是 windows/，命令行在仓库根 —— 不能用 process.cwd() */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /** CMS 采集接口的搜索响应（最小可用结构） */
 const CMS_SEARCH_XML = `<?xml version="1.0" encoding="utf-8"?>
@@ -85,7 +89,7 @@ function installFetchStub() {
 
 /** 启动一个监听随机端口的本地服务 */
 async function startServer(options = {}) {
-  const server = createLocalServer({ wwwDir: process.cwd() + '/windows/www', ...options });
+  const server = createLocalServer({ wwwDir: path.join(HERE, 'www'), ...options });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
@@ -223,6 +227,25 @@ test('本地 API 契约', async (t) => {
     assert.equal(JSON.parse(res.text).version, '1.1');
   });
 
+  await t.test('传入带正斜杠的 wwwDir 也能正常伺服静态页', async () => {
+    // 显式混用正斜杠：wwwDir 不先 path.resolve，候选路径的前缀比较恒为 false，整站会 404
+    const slashedDirs = [
+      `${HERE}/www`,
+      path.join(HERE, 'www').replace(/\\/g, '/'),
+    ];
+    for (const wwwDir of slashedDirs) {
+      const custom = await startServer({ wwwDir });
+      try {
+        const res = await custom.request('/');
+        assert.equal(res.status, 200, `根路径应返回 index.html（wwwDir=${wwwDir}）`);
+        assert.match(res.headers['content-type'], /text\/html/);
+        assert.ok(res.text.length > 0);
+      } finally {
+        await custom.close();
+      }
+    }
+  });
+
   await t.test('/api/local-file 支持 Range 且只允许下载目录内文件', async () => {
     const downloadDir = makeDownloadDir();
     const payload = Buffer.alloc(1024 * 1024);
@@ -247,12 +270,53 @@ test('本地 API 契约', async (t) => {
       const over = await local.request(url(file), { headers: { Range: 'bytes=99999999-' } });
       assert.equal(over.status, 416);
 
-      // 目录围栏：目录外文件必须 403
-      const outside = await local.request(url('C:/Windows/win.ini'));
-      assert.equal(outside.status, 403);
+      // 目录围栏：目录外文件必须 403（用系统临时目录的另一处，跨平台都可解析，
+      // 硬编码 C:/Windows/win.ini 在 Linux/macOS 上会被当成相对子路径拼进围栏内，
+      // 最终走 realpath 得到 404 而不是 403）
+      const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qtv-outside-'));
+      const outsideFile = path.join(outsideDir, 'secret.mp4');
+      fs.writeFileSync(outsideFile, 'secret');
+      try {
+        const outside = await local.request(url(outsideFile));
+        assert.equal(outside.status, 403);
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
     } finally {
       await local.close();
       fs.rmSync(downloadDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('缓存目录本身是 junction/短名时仍能读到围栏内文件', async () => {
+    // CI 的 os.tmpdir() 是 8.3 短名（C:\Users\RUNNER~1\...），realpath 会展开成长名。
+    // 若拿 realpath 后的基准去比词法路径的前缀，合法文件会被误判成 403。
+    const realDir = makeDownloadDir();
+    fs.writeFileSync(path.join(realDir, 'clip.mp4'), 'abc');
+    const linkedDir = `${realDir}-link`;
+    let linked = false;
+    try {
+      fs.symlinkSync(realDir, linkedDir, 'junction');
+      linked = true;
+    } catch {
+      // 无权限创建 junction（非 Windows / 受限环境）：跳过，不把环境限制当失败
+    }
+    if (!linked) {
+      fs.rmSync(realDir, { recursive: true, force: true });
+      return;
+    }
+
+    const viaLink = await startServer({ downloadDir: linkedDir });
+    try {
+      const res = await viaLink.request(
+        `/api/local-file?path=${encodeURIComponent(path.join(linkedDir, 'clip.mp4'))}`
+      );
+      assert.equal(res.status, 200, 'junction 命中围栏内文件不应 403');
+      assert.equal(res.text, 'abc');
+    } finally {
+      await viaLink.close();
+      fs.rmSync(linkedDir, { recursive: true, force: true });
+      fs.rmSync(realDir, { recursive: true, force: true });
     }
   });
 

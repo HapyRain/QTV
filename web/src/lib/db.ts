@@ -250,16 +250,27 @@ export async function importConfig(content: string): Promise<void> {
     const parsed = JSON.parse(data['viewingHistory']) as Record<string, unknown>[];
     if (!Array.isArray(parsed)) throw new Error('观看历史格式不正确');
     for (const item of parsed.slice(0, MAX_HISTORY)) {
-      const sourceKey = String(item.sourceCode || item.sourceName || '');
-      const vodId = String(item.vod_id || '');
+      // exportConfig 写的是本版本字段（sourceKey/vodId/totalEpisodes），
+      // 旧版 LibreTV 备份用的是 sourceCode/vod_id/episodes：两种都要认，否则恢复备份会静默丢光历史
+      const sourceKey = String(item.sourceKey || item.sourceCode || item.sourceName || '').trim();
+      const vodId = String(item.vodId || item.vod_id || '').trim();
       const title = String(item.title || '未知视频');
       if (!sourceKey || !vodId) continue;
+      const sourceUrl = String(item.sourceUrl || '').trim();
+      const pic = String(item.pic || item.cover || '').trim();
       legacy.push({
         sourceKey,
+        ...(sourceUrl ? { sourceUrl } : {}),
         vodId,
         title,
+        ...(pic ? { pic } : {}),
         episodeIndex: typeof item.episodeIndex === 'number' ? item.episodeIndex : 0,
-        totalEpisodes: Array.isArray(item.episodes) ? item.episodes.length : 0,
+        totalEpisodes:
+          typeof item.totalEpisodes === 'number'
+            ? item.totalEpisodes
+            : Array.isArray(item.episodes)
+              ? item.episodes.length
+              : 0,
         playbackPosition: typeof item.playbackPosition === 'number' ? item.playbackPosition : 0,
         duration: typeof item.duration === 'number' ? item.duration : 0,
         timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now(),
